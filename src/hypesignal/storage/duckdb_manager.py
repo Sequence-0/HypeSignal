@@ -37,6 +37,7 @@ class DuckDBManager:
             self.db_path = str(db_path)
 
         self.con = duckdb.connect(self.db_path)
+        self.con.execute("SET TimeZone='UTC';")
         self._init_schemas()
 
     def _init_schemas(self) -> None:
