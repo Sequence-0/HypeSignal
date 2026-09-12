@@ -38,20 +38,7 @@ def get_top_kols(
     db: DuckDBManager = Depends(get_db),
 ) -> List[KOLProfile]:
     """Retrieve ranked Key Opinion Leaders (KOLs) using multi-factor centrality."""
-    user_meta_map: Dict[str, Dict[str, Any]] = {}
-    try:
-        user_rows = db.con.execute("SELECT id, screen_name FROM users;").fetchall()
-        for uid, sname in user_rows:
-            user_meta_map[str(uid)] = {"screen_name": sname}
-    except Exception:
-        pass
-
-    result = network.kol_analyzer.rank_kols(
-        graph_store=network.graph_store,
-        top_k=top_k,
-        user_metadata=user_meta_map,
-    )
-    return result.top_kols
+    return network.get_top_kols(top_k=top_k, db=db)
 
 
 @router.get("/user/{user_id}", response_model=KOLProfile)

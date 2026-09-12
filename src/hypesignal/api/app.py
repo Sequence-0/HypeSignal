@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict, Optional
 
@@ -68,8 +69,9 @@ def create_app(
 
         # 1. Initialize DuckDB Storage
         if app_db is None:
-            logger.info("Initializing default DuckDBManager...")
-            app_db = DuckDBManager()
+            db_path = os.getenv("HYPESIGNAL_DB_PATH", ":memory:")
+            logger.info("Initializing default DuckDBManager at '%s'...", db_path)
+            app_db = DuckDBManager(db_path=db_path)
         app.state.db = app_db
 
         # 2. Vector Store (optional / embedded)
@@ -202,3 +204,7 @@ def create_app(
     app.include_router(connectors_router, prefix=api_v1_prefix)
 
     return app
+
+
+# Default application instance for Uvicorn / ASGI servers
+app = create_app()

@@ -465,3 +465,37 @@ def test_network_engine_profile_caching(network_engine):
 
     # Non-existent node
     assert network_engine.get_user_network_profile("unknown_user") is None
+
+
+def test_network_engine_get_top_kols_caching_and_communities(network_engine):
+    """Verify that get_top_kols populates community_id consistently and uses revision caching."""
+    network_engine.graph_store.clear()
+    network_engine.invalidate_cache()
+
+    edges = [
+        ("comm1_a", "comm1_hub"),
+        ("comm1_b", "comm1_hub"),
+        ("comm1_c", "comm1_hub"),
+        ("comm2_a", "comm2_hub"),
+        ("comm2_b", "comm2_hub"),
+    ]
+    for s, t in edges:
+        network_engine.graph_store.add_edge(s, t)
+
+    kols = network_engine.get_top_kols(top_k=5)
+    assert len(kols) > 0
+    assert kols[0].user_id == "comm1_hub"
+    # Ensure community_id is always populated
+    assert kols[0].community_id is not None
+    assert network_engine._cached_kol_profiles is not None
+
+    # Cached call returns exact same objects without recomputation
+    cached_kols = network_engine.get_top_kols(top_k=5, use_cache=True)
+    assert cached_kols[0].user_id == kols[0].user_id
+    assert cached_kols[0].community_id == kols[0].community_id
+
+    # Mutating graph increments revision and recomputes
+    network_engine.graph_store.add_edge("new_user", "comm1_hub")
+    updated_kols = network_engine.get_top_kols(top_k=5, use_cache=True)
+    assert updated_kols[0].in_degree == 4
+    assert updated_kols[0].community_id is not None

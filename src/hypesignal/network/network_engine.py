@@ -202,6 +202,69 @@ class NetworkEngine:
             recent_cascades=cascades,
         )
 
+    def get_top_kols(
+        self,
+        top_k: int = 20,
+        db: Optional[DuckDBManager] = None,
+        min_community_size: int = 2,
+        use_cache: bool = True,
+    ) -> List[KOLProfile]:
+        """Retrieve ranked Key Opinion Leaders (KOLs) with caching and community partition.
+        
+        Args:
+            top_k: Number of top KOLs to return.
+            db: Optional DuckDBManager instance for user screen_name resolution.
+            min_community_size: Minimum community size for partition detection.
+            use_cache: Whether to return cached results if graph revision is unchanged.
+            
+        Returns:
+            List of KOLProfile objects sorted by rank.
+        """
+        current_rev = getattr(self.graph_store, "revision", 0)
+
+        # Check if cached profiles exist, match current revision, and cover the requested top_k
+        if (
+            use_cache
+            and self._cached_kol_profiles is not None
+            and self._cached_revision == current_rev
+        ):
+            cached_list = sorted(self._cached_kol_profiles.values(), key=lambda p: p.rank)
+            if len(cached_list) >= top_k or len(cached_list) == self.graph_store.get_node_count():
+                return cached_list[:top_k]
+
+        total_nodes = self.graph_store.get_node_count()
+        if total_nodes == 0:
+            return []
+
+        # 1. Detect communities so community_id is always consistently populated
+        comm_res = self.community_detector.detect_communities(
+            graph_store=self.graph_store,
+            min_community_size=min_community_size,
+        )
+
+        # 2. Resolve screen names from DuckDB
+        user_meta_map: Dict[str, Dict[str, Any]] = {}
+        if db is not None:
+            try:
+                user_rows = db.con.execute("SELECT id, screen_name FROM users;").fetchall()
+                for uid, sname in user_rows:
+                    user_meta_map[str(uid)] = {"screen_name": sname}
+            except Exception as e:
+                logger.debug("User metadata lookup skipped in get_top_kols: %s", e)
+
+        # 3. Compute KOL rankings for all nodes (or at least top_k)
+        fetch_k = max(top_k, total_nodes)
+        kol_res = self.kol_analyzer.rank_kols(
+            graph_store=self.graph_store,
+            top_k=fetch_k,
+            user_metadata=user_meta_map,
+            community_partition=comm_res.partition,
+        )
+
+        self._cached_kol_profiles = {p.user_id: p for p in kol_res.top_kols}
+        self._cached_revision = current_rev
+        return kol_res.top_kols[:top_k]
+
     def get_user_network_profile(
         self,
         user_id: str,
@@ -213,31 +276,24 @@ class NetworkEngine:
         if not self.graph_store.has_node(s_uid):
             return None
 
-        current_rev = getattr(self.graph_store, "revision", None)
+        current_rev = getattr(self.graph_store, "revision", 0)
 
         # Return cached profile if available and underlying graph has not been mutated
         if (
             use_cache
             and self._cached_kol_profiles is not None
-            and (current_rev is None or self._cached_revision == current_rev)
+            and self._cached_revision == current_rev
             and s_uid in self._cached_kol_profiles
         ):
             return self._cached_kol_profiles[s_uid]
 
-        user_meta_map: Dict[str, Dict[str, Any]] = {}
-        if db is not None:
-            row = db.con.execute("SELECT screen_name FROM users WHERE id = ?", [s_uid]).fetchone()
-            if row:
-                user_meta_map[s_uid] = {"screen_name": row[0]}
-
-        ranking = self.kol_analyzer.rank_kols(
-            graph_store=self.graph_store,
+        # Compute full KOL rankings with community partition and cache them
+        self.get_top_kols(
             top_k=self.graph_store.get_node_count(),
-            user_metadata=user_meta_map,
+            db=db,
+            use_cache=False,
         )
-        self._cached_kol_profiles = {p.user_id: p for p in ranking.top_kols}
-        self._cached_revision = current_rev if current_rev is not None else 0
-        return self._cached_kol_profiles.get(s_uid)
+        return self._cached_kol_profiles.get(s_uid) if self._cached_kol_profiles else None
 
     def get_cascade_analysis(
         self,

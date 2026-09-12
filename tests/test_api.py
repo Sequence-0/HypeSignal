@@ -351,6 +351,9 @@ def test_network_endpoints(api_test_data):
         assert len(kols) > 0
         # Alice has the highest in-degree (4 incoming edges)
         assert kols[0]["user_id"] == "user_alice"
+        assert kols[0]["community_id"] is not None
+        overview_alice = next(k for k in overview["top_kols"] if k["user_id"] == "user_alice")
+        assert kols[0]["community_id"] == overview_alice["community_id"]
 
         # User network profile
         res = client.get("/api/v1/network/user/user_alice")
