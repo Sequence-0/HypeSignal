@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.13,<3.15"
 dependencies = [
+    "bertopic>=0.16.0",
     "duckdb>=1.0.0",
     "fastapi>=0.110.0",
     "langdetect>=1.0.9",
