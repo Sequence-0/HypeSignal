@@ -16,6 +16,7 @@ import polars as pl
 
 from hypesignal.models.canonical import (
     CanonicalCascadeEvent,
+    CanonicalGraphEdge,
     CanonicalPost,
     CanonicalUser,
 )
@@ -88,11 +89,23 @@ class DuckDBManager:
                 PRIMARY KEY (cascade_id, post_id, adoption_order)
             );
 
+            CREATE TABLE IF NOT EXISTS graph_edges (
+                source_id VARCHAR NOT NULL,
+                target_id VARCHAR NOT NULL,
+                relation_type VARCHAR NOT NULL DEFAULT 'FOLLOWS',
+                weight DOUBLE DEFAULT 1.0,
+                timestamp TIMESTAMP WITH TIME ZONE,
+                extra_metadata JSON,
+                PRIMARY KEY (source_id, target_id, relation_type)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_posts_time ON posts (timestamp);
             CREATE INDEX IF NOT EXISTS idx_posts_time_ms ON posts (timestamp_ms);
             CREATE INDEX IF NOT EXISTS idx_posts_author ON posts (author_id);
             CREATE INDEX IF NOT EXISTS idx_cascades_id_time ON cascade_events (cascade_id, timestamp_ms);
             CREATE INDEX IF NOT EXISTS idx_users_platform ON users (platform, id);
+            CREATE INDEX IF NOT EXISTS idx_edges_source ON graph_edges (source_id);
+            CREATE INDEX IF NOT EXISTS idx_edges_target ON graph_edges (target_id);
         """)
 
     def insert_posts(self, posts: List[CanonicalPost]) -> None:
@@ -242,6 +255,64 @@ class DuckDBManager:
             FROM tmp_cascades_arrow
         """)
         self.con.unregister("tmp_cascades_arrow")
+
+    def insert_edges(self, edges: List[CanonicalGraphEdge]) -> None:
+        """Insert a batch of CanonicalGraphEdge instances."""
+        if not edges:
+            return
+
+        records = [
+            {
+                "source_id": e.source_id,
+                "target_id": e.target_id,
+                "relation_type": e.relation_type.value if hasattr(e.relation_type, "value") else str(e.relation_type),
+                "weight": e.weight,
+                "timestamp": e.timestamp,
+                "extra_metadata": json.dumps(e.extra_metadata),
+            }
+            for e in edges
+        ]
+        df = pl.DataFrame(records)
+        self.insert_edges_df(df)
+
+    def insert_edges_df(self, df: pl.DataFrame) -> None:
+        """Bulk insert graph edges using Polars DataFrame."""
+        if df.is_empty():
+            return
+        arrow_table = df.to_arrow()
+        self.con.register("tmp_edges_arrow", arrow_table)
+        self.con.execute("""
+            INSERT OR REPLACE INTO graph_edges 
+            SELECT 
+                CAST(source_id AS VARCHAR),
+                CAST(target_id AS VARCHAR),
+                CAST(relation_type AS VARCHAR),
+                CAST(weight AS DOUBLE),
+                CAST(timestamp AS TIMESTAMP WITH TIME ZONE),
+                CAST(extra_metadata AS JSON)
+            FROM tmp_edges_arrow
+        """)
+        self.con.unregister("tmp_edges_arrow")
+
+    def get_edges_count(self) -> int:
+        """Get total number of graph edges stored."""
+        return self.con.execute("SELECT COUNT(*) FROM graph_edges").fetchone()[0]
+
+    def get_user_followers(self, user_id: str) -> List[str]:
+        """Get list of follower user IDs for a given target user."""
+        rows = self.con.execute(
+            "SELECT source_id FROM graph_edges WHERE target_id = ? AND relation_type = 'FOLLOWS'",
+            [user_id],
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def get_user_following(self, user_id: str) -> List[str]:
+        """Get list of followee user IDs that a given user follows."""
+        rows = self.con.execute(
+            "SELECT target_id FROM graph_edges WHERE source_id = ? AND relation_type = 'FOLLOWS'",
+            [user_id],
+        ).fetchall()
+        return [r[0] for r in rows]
 
     def get_posts_count(self) -> int:
         """Get total number of posts stored."""
