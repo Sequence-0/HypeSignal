@@ -586,6 +586,7 @@ dependencies = [
     { name = "duckdb" },
     { name = "en-core-web-sm" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "langdetect" },
     { name = "polars" },
     { name = "pyarrow" },
@@ -595,6 +596,7 @@ dependencies = [
     { name = "scipy" },
     { name = "sentence-transformers" },
     { name = "spacy" },
+    { name = "sse-starlette" },
     { name = "torch" },
     { name = "transformers" },
     { name = "uvicorn" },
@@ -611,6 +613,7 @@ requires-dist = [
     { name = "duckdb", specifier = ">=1.0.0" },
     { name = "en-core-web-sm", url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" },
     { name = "fastapi", specifier = ">=0.110.0" },
+    { name = "httpx", specifier = ">=0.27.0" },
     { name = "langdetect", specifier = ">=1.0.9" },
     { name = "polars", specifier = ">=1.0.0" },
     { name = "pyarrow", specifier = ">=17.0.0" },
@@ -620,6 +623,7 @@ requires-dist = [
     { name = "scipy", specifier = ">=1.12.0" },
     { name = "sentence-transformers", specifier = ">=2.5.0" },
     { name = "spacy", specifier = ">=3.7.0" },
+    { name = "sse-starlette", specifier = ">=2.0.0" },
     { name = "torch", specifier = ">=2.2.0" },
     { name = "transformers", specifier = ">=4.40.0" },
     { name = "uvicorn", specifier = ">=0.30.0" },
@@ -1783,6 +1787,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/01/cb/d7fee7ab27c6aa2e3f865fb7b50ba18c81a4c763bba12bdf53df246441bc/srsly-2.5.3-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:565f69083d33cb329cfc74317da937fb3270c0f40fabc1b4488702d8074b4a3e", size = 1242749, upload-time = "2026-03-23T11:56:43.246Z" },
     { url = "https://files.pythonhosted.org/packages/d8/d1/9bad3a0f2fa7b72f4e0cf1d267b00513092d20ef538c47f72823ae4f7656/srsly-2.5.3-cp314-cp314t-win_amd64.whl", hash = "sha256:8ac016ffaeac35bc010992b71bf8afdd39d458f201c8138d84cf78778a936e6c", size = 673783, upload-time = "2026-03-23T11:56:44.875Z" },
     { url = "https://files.pythonhosted.org/packages/2a/ae/57d1d7af907e20c077e113e0e4976f87b82c0a415403d99284a262229dd0/srsly-2.5.3-cp314-cp314t-win_arm64.whl", hash = "sha256:d822083fe26ec6728bd8c273ac121fc4ab3864a0fdf0cf0ff3efb188fcd209ed", size = 650229, upload-time = "2026-03-23T11:56:46.148Z" },
+]
+
+[[package]]
+name = "sse-starlette"
+version = "3.4.11"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "starlette" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2b/54/6767bb789b2f2fed6e0f953df949cd39dc263a384c1b65a95232598621d6/sse_starlette-3.4.11.tar.gz", hash = "sha256:1bae716c02f3e6f294be41ff333220692dae7c3cbab077c900f159676719dade", size = 34972, upload-time = "2026-09-05T12:11:04.607Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/98/6a/2ba3ed4a69babf3afdddf7d8314a48d87562c0a442206bbc2a1b50d5efc0/sse_starlette-3.4.11-py3-none-any.whl", hash = "sha256:c7b2244bdff016fe7f64e10075e89a3e6bbf899649cc89b0fe884b5545042453", size = 17122, upload-time = "2026-09-05T12:11:03.195Z" },
 ]
 
 [[package]]

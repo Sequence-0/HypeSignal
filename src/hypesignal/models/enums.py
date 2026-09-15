@@ -11,6 +11,7 @@ class PlatformType(str, Enum):
     YOUTUBE = "youtube"
     FACEBOOK = "facebook"
     INSTAGRAM = "instagram"
+    BLUESKY = "bluesky"
     DATASET = "dataset"
     OTHER = "other"
 

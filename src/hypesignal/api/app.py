@@ -19,6 +19,7 @@ from hypesignal.api.routes.timeline import router as timeline_router
 from hypesignal.api.routes.trends import router as trends_router
 from hypesignal.api.schemas import HealthResponse
 from hypesignal.connectors.base import PlatformConnector
+from hypesignal.connectors.bluesky import BlueskyConnector
 from hypesignal.connectors.reddit import RedditConnector
 from hypesignal.connectors.telegram import TelegramConnector
 from hypesignal.connectors.twitter import TwitterConnector
@@ -120,6 +121,7 @@ def create_app(
         if app_connectors is None:
             app_connectors = {
                 "twitter": TwitterConnector(),
+                "bluesky": BlueskyConnector(),
                 "reddit": RedditConnector(),
                 "youtube": YouTubeConnector(),
                 "telegram": TelegramConnector(),
