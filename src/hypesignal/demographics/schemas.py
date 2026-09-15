@@ -26,7 +26,7 @@ class PersonaProfile(BaseModel):
     primary_persona: str
     persona_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     top_interests: List[str] = Field(default_factory=list)
-    age_bracket: str = Field(default="unknown")  # '18-24', '25-34', '35-49', '50+', 'unknown'
+    age_bracket: str = Field(default="unknown")  # '<18', '18-24', '25-34', '35-49', '50-64', '65+', 'unknown'
     language: str = Field(default="en")
 
 

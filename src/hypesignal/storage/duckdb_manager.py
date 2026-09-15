@@ -336,7 +336,7 @@ class DuckDBManager:
     def get_user_followers(self, user_id: str) -> List[str]:
         """Get list of follower user IDs for a given target user."""
         rows = self.con.execute(
-            "SELECT source_id FROM graph_edges WHERE target_id = ? AND relation_type = 'FOLLOWS'",
+            "SELECT source_id FROM graph_edges WHERE target_id = ? AND LOWER(relation_type) = 'follows'",
             [user_id],
         ).fetchall()
         return [r[0] for r in rows]
@@ -344,7 +344,7 @@ class DuckDBManager:
     def get_user_following(self, user_id: str) -> List[str]:
         """Get list of followee user IDs that a given user follows."""
         rows = self.con.execute(
-            "SELECT target_id FROM graph_edges WHERE source_id = ? AND relation_type = 'FOLLOWS'",
+            "SELECT target_id FROM graph_edges WHERE source_id = ? AND LOWER(relation_type) = 'follows'",
             [user_id],
         ).fetchall()
         return [r[0] for r in rows]

@@ -4,6 +4,15 @@ Provides geographic entity extraction, language identification, zero-shot person
 interest classification, circadian behavioral profiling, and audience aggregations.
 """
 
+from hypesignal.demographics.age_classifier import (
+    AGE_BRACKETS,
+    AgePrediction,
+    MultiStageAgeClassifier,
+)
+from hypesignal.demographics.audience_profiler import (
+    InfluencerAudienceProfile,
+    InfluencerAudienceProfiler,
+)
 from hypesignal.demographics.behavioral_profiler import (
     BehavioralProfiler,
     classify_engagement_tier,
@@ -28,14 +37,19 @@ from hypesignal.demographics.schemas import (
 )
 
 __all__ = [
+    "AGE_BRACKETS",
+    "AgePrediction",
     "AggregateDemographics",
     "BehavioralProfile",
     "BehavioralProfiler",
     "DemographicsEngine",
     "GeoLocationProfile",
     "GeoProfiler",
+    "InfluencerAudienceProfile",
+    "InfluencerAudienceProfiler",
     "LanguageDetector",
     "MAJOR_CITIES",
+    "MultiStageAgeClassifier",
     "PERSONA_TAXONOMY",
     "PersonaProfile",
     "PersonaProfiler",
