@@ -4,8 +4,19 @@ Provides social graph stores, Key Opinion Leader (KOL) ranking, community detect
 and information diffusion cascade modeling.
 """
 
+from hypesignal.network.bridge_kols import (
+    BridgeKOLAnalyzer,
+    BridgeKOLLeaderboard,
+    BridgeKOLProfile,
+)
 from hypesignal.network.cascade_tracer import CascadeTracer
 from hypesignal.network.community_detector import CommunityDetector
+from hypesignal.network.cross_segment_diffusion import (
+    CrossSegmentDiffusionReport,
+    CrossSegmentDiffusionTracker,
+    SegmentAdoption,
+    SegmentTransition,
+)
 from hypesignal.network.graph_store import (
     BaseGraphStore,
     MemgraphStore,
@@ -40,4 +51,11 @@ __all__ = [
     "CascadeTree",
     "DiffusionMetrics",
     "NetworkOverview",
+    "CrossSegmentDiffusionTracker",
+    "CrossSegmentDiffusionReport",
+    "SegmentAdoption",
+    "SegmentTransition",
+    "BridgeKOLAnalyzer",
+    "BridgeKOLProfile",
+    "BridgeKOLLeaderboard",
 ]
