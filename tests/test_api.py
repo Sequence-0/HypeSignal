@@ -1,7 +1,6 @@
 """Integration and unit tests for the unified HypeSignal FastAPI application."""
 
 from datetime import datetime, timedelta, timezone
-from typing import Dict
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,16 +11,14 @@ from hypesignal.connectors.telegram import TelegramConnector
 from hypesignal.connectors.twitter import TwitterConnector
 from hypesignal.connectors.youtube import YouTubeConnector
 from hypesignal.demographics.demographics_engine import DemographicsEngine
-from hypesignal.demographics.geo_profiler import GeoProfiler
 from hypesignal.demographics.persona_profiler import PersonaProfiler
 from hypesignal.models.canonical import (
     CanonicalCascadeEvent,
-    CanonicalGraphEdge,
     CanonicalPost,
     CanonicalUser,
     PostMetrics,
 )
-from hypesignal.models.enums import PlatformType, RelationType
+from hypesignal.models.enums import PlatformType
 from hypesignal.network.graph_store import NetworkXGraphStore
 from hypesignal.network.network_engine import NetworkEngine
 from hypesignal.nlp.engine import MultiDimensionalSentimentEngine
@@ -201,6 +198,13 @@ def test_timeline_endpoints(api_test_data):
         posts = res.json()
         assert len(posts) > 0
         assert posts[0]["platform"] == "twitter"
+
+        # Slice with keyword filter
+        res_kw = client.get("/api/v1/timeline/slice", params={"keyword": "AI", "platform": "twitter"})
+        assert res_kw.status_code == 200
+        kw_posts = res_kw.json()
+        assert len(kw_posts) > 0
+        assert all("AI" in p["text"] or "ai" in str(p.get("hashtags", [])) for p in kw_posts)
 
         # Timeseries
         res = client.get("/api/v1/timeline/timeseries?interval=6 hours")

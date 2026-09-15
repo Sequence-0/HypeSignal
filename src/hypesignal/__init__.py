@@ -5,5 +5,8 @@ import uvicorn
 
 def main() -> None:
     """CLI entry point for running the HypeSignal API server."""
+    from hypesignal.config import load_env
+
+    load_env()
     print("Launching HypeSignal Analytics API server at http://127.0.0.1:8000 ...")
     uvicorn.run("hypesignal.api:app", host="0.0.0.0", port=8000, reload=False)

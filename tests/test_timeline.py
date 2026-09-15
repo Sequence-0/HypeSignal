@@ -97,3 +97,118 @@ def test_activity_timeseries_interval_validation(populated_timeline: TimelineMan
     with pytest.raises(ValueError, match="Invalid time interval"):
         populated_timeline.get_activity_timeseries(interval="invalid")
 
+
+def test_timeline_filtering_keyword_platform_video(populated_timeline: TimelineManager):
+    """Verify dynamic keyword, platform, and parent_id filters on timeline slice and timeseries."""
+    from hypesignal.models.canonical import CanonicalPost
+    from hypesignal.models.enums import PlatformType
+
+    # Insert test posts with specific keywords and video parent IDs
+    now = datetime.now(timezone.utc)
+    custom_posts = [
+        CanonicalPost(
+            id="yt_post_001",
+            platform=PlatformType.YOUTUBE,
+            author_id="user_yt_1",
+            author_screen_name="CreatorYT",
+            text="Breaking benchmark: neural network speedup 10x! #deeplearning",
+            timestamp=now - timedelta(minutes=10),
+            parent_id="video_dQw4w9WgXcQ",
+        ),
+        CanonicalPost(
+            id="tw_post_002",
+            platform=PlatformType.TWITTER,
+            author_id="user_tw_2",
+            author_screen_name="TweeterAI",
+            text="Discussion on latest AI papers #deeplearning",
+            timestamp=now - timedelta(minutes=5),
+        ),
+        CanonicalPost(
+            id="rd_post_003",
+            platform=PlatformType.REDDIT,
+            author_id="user_rd_3",
+            author_screen_name="RedditorX",
+            text="Why fast databases matter for realtime streaming",
+            timestamp=now - timedelta(minutes=2),
+        ),
+    ]
+    populated_timeline.db.insert_posts(custom_posts)
+
+    # 1. Filter by keyword: "neural network"
+    df_kw = populated_timeline.get_timeline_slice(keyword="neural network")
+    assert len(df_kw) == 1
+    assert df_kw["id"][0] == "yt_post_001"
+
+    # 2. Filter by hashtag keyword: "deeplearning"
+    df_tag = populated_timeline.get_timeline_slice(keyword="deeplearning")
+    assert len(df_tag) == 2
+
+    # 3. Filter by platform: "youtube"
+    df_plat = populated_timeline.get_timeline_slice(platform="youtube")
+    assert len(df_plat) == 1
+    assert df_plat["platform"][0] == "youtube"
+
+    # 4. Filter by video / parent_id: "dQw4w9WgXcQ"
+    df_vid = populated_timeline.get_timeline_slice(parent_id="dQw4w9WgXcQ")
+    assert len(df_vid) == 1
+    assert df_vid["id"][0] == "yt_post_001"
+
+    # 5. Combined filter: keyword + platform
+    df_both = populated_timeline.get_timeline_slice(keyword="deeplearning", platform="twitter")
+    assert len(df_both) == 1
+    assert df_both["id"][0] == "tw_post_002"
+
+    # 6. Timeseries with keyword and platform filter
+    ts_yt = populated_timeline.get_activity_timeseries(interval="1 hour", platform="youtube", keyword="neural")
+    assert len(ts_yt) >= 1
+    assert ts_yt["post_count"].sum() == 1
+
+    # 7. Case-insensitive platform filter (Issue 4 fix)
+    df_plat_case = populated_timeline.get_timeline_slice(platform="YouTube")
+    assert len(df_plat_case) == 1
+    assert df_plat_case["platform"][0] == "youtube"
+
+    df_tw_case = populated_timeline.get_timeline_slice(platform="TWITTER")
+    assert len(df_tw_case) >= 1
+
+
+def test_timeline_slice_no_data_loss_on_json_deserialization():
+    """Verify Issue 2 fix: JSON strings from DuckDB do not cause ValidationError or data loss."""
+    import json
+    from hypesignal.api.routes.timeline import _record_to_canonical_post
+    from hypesignal.models.canonical import PostMetrics
+
+    raw_duckdb_row = {
+        "id": "post_full_123",
+        "platform": "youtube",
+        "author_id": "author_yt_99",
+        "author_screen_name": "TechChannel",
+        "text": "Complete guide to modern AI #ai https://youtube.com/watch?v=123",
+        "timestamp": datetime.now(timezone.utc),
+        "timestamp_ms": 1700000000000,
+        "parent_id": "video_123",
+        "reply_to_user_id": None,
+        "source_client": "YouTube Data API v3",
+        "urls": json.dumps(["https://youtube.com/watch?v=123"]),
+        "hashtags": json.dumps(["ai", "tech"]),
+        "mentions": json.dumps(["@google"]),
+        "media_urls": json.dumps([]),
+        "metrics": json.dumps({"likes": 42, "replies": 5, "reposts": 0, "views": 1000}),
+        "extra_metadata": json.dumps({"video_id": "123", "verified": True}),
+    }
+
+    post = _record_to_canonical_post(raw_duckdb_row)
+    assert post.id == "post_full_123"
+    assert post.platform.value == "youtube"
+    assert isinstance(post.metrics, PostMetrics)
+    assert post.metrics.likes == 42
+    assert post.metrics.replies == 5
+    assert post.metrics.views == 1000
+    assert post.hashtags == ["ai", "tech"]
+    assert post.urls == ["https://youtube.com/watch?v=123"]
+    assert post.mentions == ["@google"]
+    assert post.extra_metadata.get("video_id") == "123"
+    assert post.extra_metadata.get("verified") is True
+
+
+

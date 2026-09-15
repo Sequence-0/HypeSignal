@@ -1,8 +1,5 @@
 """Tests for live platform ingestion stubs and rate limiting."""
 
-import time
-from datetime import datetime, timezone
-
 import pytest
 
 from hypesignal.connectors.base import TokenBucketRateLimiter
@@ -13,7 +10,11 @@ from hypesignal.connectors.schemas import (
 )
 from hypesignal.connectors.telegram import TelegramConnector
 from hypesignal.connectors.twitter import TwitterConnector
-from hypesignal.connectors.youtube import YouTubeConnector
+from hypesignal.connectors.youtube import (
+    YouTubeConnector,
+    _sanitize_key,
+    _sanitize_url,
+)
 from hypesignal.models.enums import PlatformType
 
 
@@ -242,3 +243,274 @@ def test_connector_stats_thread_safety():
     assert info.stats.requests_made == 20
     assert info.stats.messages_ingested == 20
     assert info.stats.error_count == 0
+
+
+def test_youtube_connector_live_polling_mock_transport():
+    """Test live YouTube polling flow with httpx.MockTransport parsing comment threads and replies."""
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "commentThreads" in str(request.url)
+        assert request.url.params.get("key") == "AIzaSyFakeKey12345"
+        payload = {
+            "kind": "youtube#commentThreadListResponse",
+            "items": [
+                {
+                    "id": "thread_abc123",
+                    "snippet": {
+                        "videoId": "vid_xyz",
+                        "topLevelComment": {
+                            "id": "thread_abc123",
+                            "snippet": {
+                                "textOriginal": "Awesome deep dive into transformer architecture! #ai #llm @engineer",
+                                "authorDisplayName": "TechGuy",
+                                "authorChannelId": {"value": "UC_channel_1"},
+                                "likeCount": 15,
+                                "publishedAt": "2024-03-01T12:00:00Z",
+                            },
+                        },
+                        "totalReplyCount": 1,
+                    },
+                    "replies": {
+                        "comments": [
+                            {
+                                "id": "comment_rep_1",
+                                "snippet": {
+                                    "videoId": "vid_xyz",
+                                    "parentId": "thread_abc123",
+                                    "textOriginal": "Totally agree with the attention mechanism point!",
+                                    "authorDisplayName": "DevGal",
+                                    "authorChannelId": {"value": "UC_channel_2"},
+                                    "likeCount": 3,
+                                    "publishedAt": "2024-03-01T12:05:00Z",
+                                },
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+        return httpx.Response(200, json=payload)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    config = ConnectorConfig(
+        platform=PlatformType.YOUTUBE,
+        credentials={"api_key": "AIzaSyFakeKey12345", "daily_quota_limit": 100},
+    )
+    conn = YouTubeConnector(config=config, http_client=client)
+    assert conn.connect() is True
+
+    # Poll with explicit video target: query="video:vid_xyz"
+    posts = conn.poll(query="video:vid_xyz", limit=10)
+    assert len(posts) == 2
+    # Verify top-level comment
+    top_post = posts[0]
+    assert top_post.id == "thread_abc123"
+    assert top_post.platform == PlatformType.YOUTUBE
+    assert top_post.author_screen_name == "TechGuy"
+    assert top_post.metrics.likes == 15
+    assert top_post.metrics.replies == 1
+    assert "transformer architecture" in top_post.text
+    assert "ai" in top_post.hashtags
+
+    # Verify reply comment inherited parent's videoId (Issue 3 fix)
+    reply_post = posts[1]
+    assert reply_post.id == "comment_rep_1"
+    assert reply_post.parent_id == "thread_abc123"
+    assert reply_post.author_screen_name == "DevGal"
+    assert reply_post.metrics.likes == 3
+    assert "https://www.youtube.com/watch?v=vid_xyz" in reply_post.urls
+    assert reply_post.extra_metadata.get("video_id") == "vid_xyz"
+
+    # Check quota consumption: 1 unit
+    stats = conn.get_quota_stats()
+    assert stats["quota_used"] == 1
+    assert stats["quota_remaining"] == 99
+
+
+def test_youtube_connector_bare_keyword_search_resolution():
+    """Test bare keyword query resolves top video via /search and queries commentThreads."""
+    import httpx
+
+    search_called = False
+    threads_called = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal search_called, threads_called
+        path = request.url.path
+        if path.endswith("/search"):
+            search_called = True
+            assert request.url.params.get("q") == "deeplearning"
+            return httpx.Response(
+                200,
+                json={"items": [{"id": {"videoId": "vid_found_99"}}]},
+            )
+        elif path.endswith("/commentThreads"):
+            threads_called = True
+            assert request.url.params.get("videoId") == "vid_found_99"
+            payload = {
+                "kind": "youtube#commentThreadListResponse",
+                "items": [
+                    {
+                        "id": "thread_resolved_1",
+                        "snippet": {
+                            "videoId": "vid_found_99",
+                            "topLevelComment": {
+                                "id": "thread_resolved_1",
+                                "snippet": {
+                                    "textOriginal": "Great deep learning talk!",
+                                    "authorDisplayName": "AIWatcher",
+                                    "likeCount": 10,
+                                },
+                            },
+                        },
+                    }
+                ],
+            }
+            return httpx.Response(200, json=payload)
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    config = ConnectorConfig(
+        platform=PlatformType.YOUTUBE,
+        credentials={"api_key": "AIzaSyFakeKey12345", "daily_quota_limit": 500},
+    )
+    conn = YouTubeConnector(config=config, http_client=client)
+    conn.connect()
+
+    posts = conn.poll(query="deeplearning", limit=5)
+    assert search_called is True
+    assert threads_called is True
+    assert len(posts) == 1
+    assert posts[0].id == "thread_resolved_1"
+    assert conn.get_quota_stats()["quota_used"] == 101
+
+
+def test_youtube_connector_channel_target_order_is_time():
+    """Verify YouTube Data API v3 rule: channel target commentThreads MUST use order='time', not 'relevance'."""
+    import httpx
+
+    captured_order = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal captured_order
+        captured_order = request.url.params.get("order")
+        return httpx.Response(200, json={"items": []})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    config = ConnectorConfig(
+        platform=PlatformType.YOUTUBE,
+        credentials={"api_key": "AIzaSyFakeKey12345", "daily_quota_limit": 500},
+    )
+    conn = YouTubeConnector(config=config, http_client=client)
+    conn.connect()
+
+    # Channel query: order must be "time"
+    conn.poll(query="channel:UC_x5XG1OV2P6uZZ5FSM9Ttw", limit=5)
+    assert captured_order == "time"
+    assert captured_order != "relevance"
+
+    # Video query: order must be "relevance"
+    conn.poll(query="video:vid_xyz", limit=5)
+    assert captured_order == "relevance"
+
+
+
+def test_youtube_connector_quota_guardrail():
+    """Test daily quota limit halts live requests and gracefully falls back to mock posts."""
+    import httpx
+
+    request_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(200, json={"items": []})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    # Daily quota limit = 2 units
+    config = ConnectorConfig(
+        platform=PlatformType.YOUTUBE,
+        credentials={"api_key": "AIzaSyFakeKey12345", "daily_quota_limit": 2},
+    )
+    conn = YouTubeConnector(config=config, http_client=client)
+    conn.connect()
+
+    # 1st request (consumes 1 unit) -> live call
+    assert len(conn.poll(query="q1", limit=2)) > 0
+    assert request_count == 1
+    assert conn.get_quota_stats()["quota_used"] == 1
+
+    # 2nd request (consumes 1 unit) -> live call
+    assert len(conn.poll(query="q2", limit=2)) > 0
+    assert request_count == 2
+    assert conn.get_quota_stats()["quota_used"] == 2
+    assert conn.get_quota_stats()["quota_remaining"] == 0
+
+    # 3rd request (needs 1 unit, but quota limit 2 is reached) -> blocked, mock fallback
+    p3 = conn.poll(query="q3", limit=2)
+    assert request_count == 2  # No extra HTTP request made!
+    assert len(p3) > 0  # Fallback mock posts returned
+    assert p3[0].author_screen_name == "TechStreamer"
+
+    # Reset quota
+    conn.reset_quota()
+    assert conn.get_quota_stats()["quota_used"] == 0
+    assert len(conn.poll(query="q4", limit=2)) > 0
+    assert request_count == 3  # HTTP request allowed again
+
+
+def test_youtube_connector_403_quota_exceeded():
+    """Test that an HTTP 403 quotaExceeded response immediately depletes remaining quota and falls back."""
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        error_resp = {
+            "error": {
+                "code": 403,
+                "message": "The request cannot be completed because you have exceeded your quota.",
+                "errors": [{"reason": "quotaExceeded", "domain": "youtube.quota"}],
+            }
+        }
+        return httpx.Response(403, json=error_resp)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    config = ConnectorConfig(
+        platform=PlatformType.YOUTUBE,
+        credentials={"api_key": "AIzaSyFakeKey12345", "daily_quota_limit": 5000},
+    )
+    conn = YouTubeConnector(config=config, http_client=client)
+    conn.connect()
+
+    posts = conn.poll(query="test", limit=2)
+    # Verify fallback to mock posts without throwing exception
+    assert len(posts) > 0
+    # Quota should now be marked as depleted (daily_quota_limit)
+    assert conn.get_quota_stats()["quota_remaining"] == 0
+    assert conn.get_quota_stats()["quota_used"] == 5000
+
+
+def test_youtube_connector_url_and_key_sanitization():
+    """Test masking of sensitive API keys in URLs, error logs, and helper methods."""
+    key = "AIzaSyB_1234567890abcdef"
+    sanitized_key = _sanitize_key(key)
+    assert sanitized_key == "AIza...cdef"
+    assert key not in sanitized_key
+
+    # None and short keys
+    assert _sanitize_key(None) == "<none>"
+    assert _sanitize_key("") == "<none>"
+    assert _sanitize_key("short") == "***"
+
+    # URL sanitization
+    raw_url = "https://www.googleapis.com/youtube/v3/commentThreads?part=snippet&key=AIzaSyB_1234567890abcdef&maxResults=50"
+    cleaned_url = _sanitize_url(raw_url)
+    assert "AIzaSyB" not in cleaned_url
+    assert "key=[REDACTED]" in cleaned_url
+    assert "part=snippet" in cleaned_url
+    assert "maxResults=50" in cleaned_url
+
+    # When key is first param
+    first_param_url = "https://example.com/api?key=mysecretkey&other=1"
+    assert _sanitize_url(first_param_url) == "https://example.com/api?key=[REDACTED]&other=1"
+

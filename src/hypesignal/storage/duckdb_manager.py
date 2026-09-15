@@ -363,26 +363,41 @@ class DuckDBManager:
 
     def get_posts_in_window(
         self,
-        start_time: datetime,
-        end_time: datetime,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
         platform: Optional[str] = None,
+        keyword: Optional[str] = None,
+        parent_id: Optional[str] = None,
+        author_id: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> pl.DataFrame:
-        """Query posts within a specific time window as a Polars DataFrame."""
-        query = """
-            SELECT * FROM posts 
-            WHERE timestamp >= ? AND timestamp <= ?
-        """
-        params: List[Any] = [start_time, end_time]
+        """Query posts within an optional time window with keyword, parent/video, platform, and author filters."""
+        where_clauses: List[str] = []
+        params: List[Any] = []
 
+        if start_time is not None:
+            where_clauses.append("timestamp >= ?")
+            params.append(start_time)
+        if end_time is not None:
+            where_clauses.append("timestamp <= ?")
+            params.append(end_time)
         if platform:
-            query += " AND platform = ?"
+            where_clauses.append("LOWER(platform) = LOWER(?)")
             params.append(platform)
+        if keyword:
+            where_clauses.append("(text ILIKE ? OR CAST(hashtags AS VARCHAR) ILIKE ?)")
+            kw = f"%{keyword}%"
+            params.extend([kw, kw])
+        if parent_id:
+            where_clauses.append("(parent_id = ? OR id = ? OR parent_id = ? OR CAST(urls AS VARCHAR) ILIKE ?)")
+            params.extend([parent_id, parent_id, f"video_{parent_id}", f"%{parent_id}%"])
+        if author_id:
+            where_clauses.append("author_id = ?")
+            params.append(author_id)
 
-        query += " ORDER BY timestamp ASC"
-
-        if limit:
-            query += f" LIMIT {int(limit)}"
+        where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        limit_sql = f" LIMIT {int(limit)}" if limit else ""
+        query = f"SELECT * FROM posts {where_sql} ORDER BY timestamp ASC{limit_sql}"
 
         res = self.con.execute(query, params).pl()
         return res

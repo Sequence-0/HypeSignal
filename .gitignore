@@ -12,5 +12,10 @@ wheels/
 #Dataset
 Dataset/
 
-#Docs
+# Docs
 Problem_Statement.md
+
+# Environment and local secrets
+.env
+.env.*
+!.env.example

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,13 +21,16 @@ from hypesignal.api.routes.timeline import router as timeline_router
 from hypesignal.api.routes.trends import router as trends_router
 from hypesignal.api.schemas import HealthResponse
 from hypesignal.api.streaming import EventBroadcaster
+from hypesignal.config import load_env
 from hypesignal.connectors.base import PlatformConnector
 from hypesignal.connectors.bluesky import BlueskyConnector
 from hypesignal.connectors.reddit import RedditConnector
+from hypesignal.connectors.schemas import ConnectorConfig
 from hypesignal.connectors.telegram import TelegramConnector
 from hypesignal.connectors.twitter import TwitterConnector
 from hypesignal.connectors.youtube import YouTubeConnector
 from hypesignal.demographics.demographics_engine import DemographicsEngine
+from hypesignal.models.enums import PlatformType
 from hypesignal.network.network_engine import NetworkEngine
 from hypesignal.nlp.engine import MultiDimensionalSentimentEngine
 from hypesignal.nlp.temporal_sentiment import TemporalSentimentTracker
@@ -62,6 +65,7 @@ def create_app(
     version: str = "0.1.0",
 ) -> FastAPI:
     """Create and configure the unified HypeSignal FastAPI application."""
+    load_env()
     app_db = db
     app_vector = vector_store
     app_timeline = timeline
@@ -129,11 +133,22 @@ def create_app(
 
         # 9. Platform Connectors
         if app_connectors is None:
+            yt_api_key = os.getenv("YOUTUBE_API_KEY")
+            yt_quota_limit = int(os.getenv("YOUTUBE_DAILY_QUOTA_LIMIT", "5000"))
+            yt_max_rpm = int(os.getenv("YOUTUBE_MAX_RPM", "15"))
+            yt_creds: Dict[str, Any] = {"daily_quota_limit": yt_quota_limit}
+            if yt_api_key:
+                yt_creds["api_key"] = yt_api_key
+            yt_config = ConnectorConfig(
+                platform=PlatformType.YOUTUBE,
+                max_requests_per_minute=yt_max_rpm,
+                credentials=yt_creds,
+            )
             app_connectors = {
                 "twitter": TwitterConnector(),
                 "bluesky": BlueskyConnector(),
                 "reddit": RedditConnector(),
-                "youtube": YouTubeConnector(),
+                "youtube": YouTubeConnector(config=yt_config),
                 "telegram": TelegramConnector(),
             }
         app.state.connectors = app_connectors

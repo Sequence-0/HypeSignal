@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from hypesignal.api.deps import get_db, get_timeline
+from hypesignal.api.deps import get_timeline
 from hypesignal.api.schemas import (
     ActivityTimeseriesPoint,
     ActivityTimeseriesResponse,
@@ -15,9 +16,53 @@ from hypesignal.api.schemas import (
     CascadeChronologyResponse,
     TimelineBoundsResponse,
 )
-from hypesignal.models.canonical import CanonicalPost
-from hypesignal.storage.duckdb_manager import DuckDBManager
+from hypesignal.models.canonical import CanonicalPost, PostMetrics
 from hypesignal.timeline.timeline_manager import TimelineManager
+
+
+def _record_to_canonical_post(r: Dict[str, Any]) -> CanonicalPost:
+    """Safely deserialize JSON fields from DuckDB and reconstruct a complete CanonicalPost."""
+    r_dict = dict(r)
+    for json_field in ("metrics", "extra_metadata", "urls", "hashtags", "mentions", "media_urls"):
+        val = r_dict.get(json_field)
+        if isinstance(val, str):
+            try:
+                r_dict[json_field] = json.loads(val)
+            except Exception:
+                pass
+
+    try:
+        return CanonicalPost.model_validate(r_dict)
+    except Exception:
+        # Fallback if types or struct shape still differ
+        metrics_val = r_dict.get("metrics")
+        if isinstance(metrics_val, dict):
+            try:
+                metrics_obj = PostMetrics.model_validate(metrics_val)
+            except Exception:
+                metrics_obj = PostMetrics()
+        elif isinstance(metrics_val, PostMetrics):
+            metrics_obj = metrics_val
+        else:
+            metrics_obj = PostMetrics()
+
+        return CanonicalPost(
+            id=str(r_dict["id"]),
+            platform=r_dict["platform"],
+            author_id=str(r_dict["author_id"]),
+            author_screen_name=r_dict.get("author_screen_name"),
+            text=r_dict.get("text") or "",
+            timestamp=r_dict["timestamp"],
+            parent_id=r_dict.get("parent_id"),
+            reply_to_user_id=r_dict.get("reply_to_user_id"),
+            source_client=r_dict.get("source_client"),
+            urls=r_dict.get("urls") if isinstance(r_dict.get("urls"), list) else [],
+            hashtags=r_dict.get("hashtags") if isinstance(r_dict.get("hashtags"), list) else [],
+            mentions=r_dict.get("mentions") if isinstance(r_dict.get("mentions"), list) else [],
+            media_urls=r_dict.get("media_urls") if isinstance(r_dict.get("media_urls"), list) else [],
+            metrics=metrics_obj,
+            extra_metadata=r_dict.get("extra_metadata") if isinstance(r_dict.get("extra_metadata"), dict) else {},
+        )
 
 router = APIRouter(prefix="/timeline", tags=["Timeline & Historical Ingestion"])
 
@@ -37,41 +82,29 @@ def get_timeline_bounds(
 
 @router.get("/slice", response_model=List[CanonicalPost])
 def get_timeline_slice(
-    start_time: datetime = Query(..., description="Start of observation interval (UTC)"),
-    end_time: datetime = Query(..., description="End of observation interval (UTC)"),
-    platform: Optional[str] = Query(default=None, description="Optional platform filter (e.g. twitter)"),
+    start_time: Optional[datetime] = Query(default=None, description="Start of observation interval (UTC)"),
+    end_time: Optional[datetime] = Query(default=None, description="End of observation interval (UTC)"),
+    platform: Optional[str] = Query(default=None, description="Optional platform filter (e.g. twitter, youtube, reddit)"),
+    keyword: Optional[str] = Query(default=None, description="Optional keyword or phrase search across post text and hashtags"),
+    parent_id: Optional[str] = Query(default=None, description="Optional filter by root post, video ID, or thread ID"),
+    author_id: Optional[str] = Query(default=None, description="Optional filter by author user ID"),
     limit: int = Query(default=100, ge=1, le=1000, description="Max posts to return"),
     timeline: TimelineManager = Depends(get_timeline),
 ) -> List[CanonicalPost]:
-    """Retrieve chronological slice of posts within [start_time, end_time]."""
+    """Retrieve chronological slice of posts with keyword, video/thread, platform, and time window filters."""
     df = timeline.get_timeline_slice(
         start_time=start_time,
         end_time=end_time,
         platform=platform,
+        keyword=keyword,
+        parent_id=parent_id,
+        author_id=author_id,
         limit=limit,
     )
     if df.is_empty():
         return []
 
-    # Parse dataframe records into CanonicalPost
-    records = df.to_dicts()
-    posts: List[CanonicalPost] = []
-    for r in records:
-        try:
-            posts.append(CanonicalPost.model_validate(r))
-        except Exception:
-            # Fallback for DuckDB struct columns or types
-            posts.append(
-                CanonicalPost(
-                    id=str(r["id"]),
-                    platform=r["platform"],
-                    author_id=str(r["author_id"]),
-                    author_screen_name=r.get("author_screen_name"),
-                    text=r["text"],
-                    timestamp=r["timestamp"],
-                )
-            )
-    return posts
+    return [_record_to_canonical_post(r) for r in df.to_dicts()]
 
 
 @router.get("/timeseries", response_model=ActivityTimeseriesResponse)
@@ -79,14 +112,18 @@ def get_activity_timeseries(
     interval: str = Query(default="1 hour", description="Time bucket interval (e.g. '1 hour', '1 day')"),
     start_time: Optional[datetime] = Query(default=None, description="Optional start datetime"),
     end_time: Optional[datetime] = Query(default=None, description="Optional end datetime"),
+    platform: Optional[str] = Query(default=None, description="Optional platform filter (e.g. youtube, twitter)"),
+    keyword: Optional[str] = Query(default=None, description="Optional keyword or hashtag filter"),
     timeline: TimelineManager = Depends(get_timeline),
 ) -> ActivityTimeseriesResponse:
-    """Aggregate historical post volume into regular chronological time buckets."""
+    """Aggregate historical post volume into regular chronological time buckets with optional keyword and platform filtering."""
     try:
         df = timeline.get_activity_timeseries(
             interval=interval,
             start_time=start_time,
             end_time=end_time,
+            platform=platform,
+            keyword=keyword,
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -152,16 +189,4 @@ def get_user_timeline(
     if df.is_empty():
         return []
 
-    posts: List[CanonicalPost] = []
-    for r in df.to_dicts():
-        posts.append(
-            CanonicalPost(
-                id=str(r["id"]),
-                platform=r["platform"],
-                author_id=str(r["author_id"]),
-                author_screen_name=r.get("author_screen_name"),
-                text=r["text"],
-                timestamp=r["timestamp"],
-            )
-        )
-    return posts
+    return [_record_to_canonical_post(r) for r in df.to_dicts()]
