@@ -5,19 +5,22 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import AsyncIterator, Dict, Optional
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from hypesignal.api.routes.analytics import router as analytics_router
 from hypesignal.api.routes.connectors import router as connectors_router
 from hypesignal.api.routes.demographics import router as demographics_router
 from hypesignal.api.routes.network import router as network_router
 from hypesignal.api.routes.sentiment import router as sentiment_router
+from hypesignal.api.routes.streaming import router as streaming_router
 from hypesignal.api.routes.timeline import router as timeline_router
 from hypesignal.api.routes.trends import router as trends_router
 from hypesignal.api.schemas import HealthResponse
+from hypesignal.api.streaming import EventBroadcaster
 from hypesignal.connectors.base import PlatformConnector
 from hypesignal.connectors.bluesky import BlueskyConnector
 from hypesignal.connectors.reddit import RedditConnector
@@ -28,9 +31,11 @@ from hypesignal.demographics.demographics_engine import DemographicsEngine
 from hypesignal.network.network_engine import NetworkEngine
 from hypesignal.nlp.engine import MultiDimensionalSentimentEngine
 from hypesignal.nlp.temporal_sentiment import TemporalSentimentTracker
+from hypesignal.orchestration.pipeline_orchestrator import AnalyticsPipelineOrchestrator
 from hypesignal.storage.duckdb_manager import DuckDBManager
 from hypesignal.storage.vector_store import VectorStoreManager
 from hypesignal.timeline.timeline_manager import TimelineManager
+from hypesignal.trends.narrative_drift import NarrativeDriftTracker
 from hypesignal.trends.trends_engine import TrendsEngine
 
 logger = logging.getLogger(__name__)
@@ -46,6 +51,9 @@ def create_app(
     trends: Optional[TrendsEngine] = None,
     network: Optional[NetworkEngine] = None,
     connectors: Optional[Dict[str, PlatformConnector]] = None,
+    broadcaster: Optional[EventBroadcaster] = None,
+    orchestrator: Optional[AnalyticsPipelineOrchestrator] = None,
+    start_orchestrator: bool = False,
     device: Optional[str] = None,
     auto_connect: bool = True,
     cors_origins: Optional[list[str]] = None,
@@ -63,10 +71,12 @@ def create_app(
     app_trends = trends
     app_network = network
     app_connectors = connectors
+    app_broadcaster = broadcaster
+    app_orchestrator = orchestrator
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        nonlocal app_db, app_vector, app_timeline, app_nlp, app_tracker, app_demographics, app_trends, app_network, app_connectors
+        nonlocal app_db, app_vector, app_timeline, app_nlp, app_tracker, app_demographics, app_trends, app_network, app_connectors, app_broadcaster, app_orchestrator
 
         # 1. Initialize DuckDB Storage
         if app_db is None:
@@ -128,6 +138,28 @@ def create_app(
             }
         app.state.connectors = app_connectors
 
+        # 10. Event Broadcaster (SSE)
+        if app_broadcaster is None:
+            app_broadcaster = EventBroadcaster()
+        app.state.broadcaster = app_broadcaster
+
+        # 11. Background Analytics Pipeline Orchestrator
+        if app_orchestrator is None:
+            app_orchestrator = AnalyticsPipelineOrchestrator(
+                db=app_db,
+                nlp=app_nlp,
+                trends=app_trends,
+                connectors=app_connectors,
+                broadcaster=app_broadcaster,
+            )
+        app.state.orchestrator = app_orchestrator
+        if start_orchestrator:
+            app_orchestrator.start()
+
+        # 12. Cached Narrative Drift Tracker (re-using trends embedding model)
+        st_model = getattr(getattr(app_trends, "topic_modeler", None), "embedding_model", None)
+        app.state.narrative_drift = NarrativeDriftTracker(sentence_transformer=st_model)
+
         # Auto-connect enabled connectors
         if auto_connect:
             for name, conn in app_connectors.items():
@@ -138,7 +170,10 @@ def create_app(
         yield
 
         # Teardown
-        logger.info("Shutting down HypeSignal platform connectors...")
+        logger.info("Shutting down HypeSignal background orchestrator and platform connectors...")
+        if app_orchestrator is not None and app_orchestrator.is_running:
+            await app_orchestrator.stop()
+
         for name, conn in app_connectors.items():
             if conn.is_connected():
                 conn.disconnect()
@@ -193,6 +228,8 @@ def create_app(
                 "trends": "online" if getattr(request.app.state, "trends", None) else "offline",
                 "network": "online" if getattr(request.app.state, "network", None) else "offline",
                 "connectors": f"{len(getattr(request.app.state, 'connectors', {}))} registered",
+                "orchestrator": "online" if getattr(request.app.state, "orchestrator", None) else "offline",
+                "broadcaster": "online" if getattr(request.app.state, "broadcaster", None) else "offline",
             },
         )
 
@@ -204,6 +241,8 @@ def create_app(
     app.include_router(trends_router, prefix=api_v1_prefix)
     app.include_router(network_router, prefix=api_v1_prefix)
     app.include_router(connectors_router, prefix=api_v1_prefix)
+    app.include_router(analytics_router, prefix=api_v1_prefix)
+    app.include_router(streaming_router, prefix=api_v1_prefix)
 
     return app
 

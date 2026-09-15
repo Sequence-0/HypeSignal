@@ -9,11 +9,11 @@ virality potential.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
-import numpy as np
 from pydantic import BaseModel, Field
 
 from hypesignal.storage.duckdb_manager import DuckDBManager
@@ -42,6 +42,11 @@ class TrendForecast(BaseModel):
     user_diversity_ratio: float = Field(default=1.0, ge=0.0, le=1.0)
     total_volume: int = Field(..., ge=0)
     window_volumes: List[int] = Field(default_factory=list)
+
+    @property
+    def velocity(self) -> float:
+        """Alias for current_velocity."""
+        return self.current_velocity
 
 
 class TrendForecaster:
@@ -252,15 +257,17 @@ class TrendForecaster:
         total_span = timedelta(minutes=window_minutes * num_windows)
         start_time = ref_time - total_span
 
-        # Query posts matching term in total span
+        # Query posts matching term in total span with word boundary regex
+        clean_term = term.strip().lstrip("#")
+        escaped_term = re.escape(clean_term)
+        pattern = f"(?i)(?:^|[^a-zA-Z0-9_])#?{escaped_term}(?:[^a-zA-Z0-9_]|$)"
         query = """
             SELECT timestamp, author_id FROM posts
             WHERE timestamp >= ? AND timestamp <= ?
-              AND LOWER(text) LIKE LOWER(?)
+              AND REGEXP_MATCHES(text, ?)
             ORDER BY timestamp ASC;
         """
-        term_pattern = f"%{term.strip()}%"
-        rows = db.con.execute(query, [start_time, ref_time, term_pattern]).fetchall()
+        rows = db.con.execute(query, [start_time, ref_time, pattern]).fetchall()
 
         # Bucket into windows
         volumes = [0] * num_windows
@@ -280,4 +287,19 @@ class TrendForecaster:
             volumes=volumes,
             window_duration_minutes=float(window_minutes),
             unique_authors=len(unique_authors),
+        )
+
+    def forecast_trend_kinematics(
+        self,
+        db: DuckDBManager,
+        term: str,
+        window_duration_minutes: float = 60.0,
+        **kwargs: Any,
+    ) -> TrendForecast:
+        """Forecast trend velocity, acceleration, and lifecycle state from DuckDB."""
+        return self.forecast_from_db(
+            db=db,
+            term=term,
+            window_minutes=int(window_duration_minutes),
+            **kwargs,
         )

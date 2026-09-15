@@ -41,8 +41,10 @@ class NarrativeDriftTracker:
         model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
         device: Optional[str] = None,
         sentence_transformer: Optional[SentenceTransformer] = None,
+        engine: Optional[Any] = None,
         drift_threshold: float = 0.25,
         inversion_threshold: float = 0.35,
+        **kwargs: Any,
     ) -> None:
         """Initialize tracker with embedding model and sensitivity thresholds.
         
@@ -50,6 +52,7 @@ class NarrativeDriftTracker:
             model_name: HuggingFace sentence transformer identifier.
             device: Device target ('cpu', 'cuda', etc.).
             sentence_transformer: Optional shared SentenceTransformer instance.
+            engine: Optional NLP or embedding engine providing sentence transformer.
             drift_threshold: Minimum cosine distance (1 - cos) to trigger semantic drift alert.
             inversion_threshold: Minimum change in sentiment score to consider significant.
         """
@@ -57,8 +60,15 @@ class NarrativeDriftTracker:
         self.drift_threshold = float(drift_threshold)
         self.inversion_threshold = float(inversion_threshold)
 
-        if sentence_transformer is not None:
-            self.model = sentence_transformer
+        st_model = sentence_transformer
+        if st_model is None and engine is not None:
+            if hasattr(engine, "model"):
+                st_model = engine.model
+            elif hasattr(engine, "sentence_transformer"):
+                st_model = engine.sentence_transformer
+
+        if st_model is not None:
+            self.model = st_model
         else:
             logger.info("Loading SentenceTransformer %s on %s for narrative drift...", model_name, self.device)
             self.model = SentenceTransformer(model_name, device=self.device)
@@ -217,13 +227,14 @@ class NarrativeDriftTracker:
         Returns:
             NarrativeDriftAlert evaluating drift between window 1 and window 2.
         """
-        def _fetch_window_data(t_start: datetime, t_end: datetime) -> Tuple[List[str], List[float]]:
-            # Query posts joining post_analytics to fetch signed sentiment
-            query = """
+        def _fetch_window_data(t_start: datetime, t_end: datetime, inclusive_end: bool = False) -> Tuple[List[str], List[float]]:
+            # Query posts joining post_analytics to fetch signed sentiment with half-open window for baseline
+            end_op = "<=" if inclusive_end else "<"
+            query = f"""
                 SELECT p.text, a.effective_polarity, a.sentiment_score
                 FROM posts p
                 LEFT JOIN post_analytics a ON p.id = a.post_id
-                WHERE p.timestamp >= ? AND p.timestamp <= ?
+                WHERE p.timestamp >= ? AND p.timestamp {end_op} ?
                   AND LOWER(p.text) LIKE LOWER(?)
                 ORDER BY p.timestamp ASC;
             """
@@ -249,8 +260,8 @@ class NarrativeDriftTracker:
 
             return texts, scores
 
-        w1_texts, w1_scores = _fetch_window_data(window_1_start, window_1_end)
-        w2_texts, w2_scores = _fetch_window_data(window_2_start, window_2_end)
+        w1_texts, w1_scores = _fetch_window_data(window_1_start, window_1_end, inclusive_end=False)
+        w2_texts, w2_scores = _fetch_window_data(window_2_start, window_2_end, inclusive_end=True)
 
         return self.track_drift(
             topic=topic,
@@ -258,4 +269,49 @@ class NarrativeDriftTracker:
             texts_after=w2_texts,
             sentiments_before=w1_scores,
             sentiments_after=w2_scores,
+        )
+
+    def track_drift_from_duckdb(
+        self,
+        db: DuckDBManager,
+        topic: str,
+        window_minutes: float = 60.0,
+        reference_time: Optional[datetime] = None,
+    ) -> NarrativeDriftAlert:
+        """Compute drift between baseline window [t - 2w, t - w] and active window [t - w, t].
+        
+        Args:
+            db: DuckDBManager analytical store.
+            topic: Target topic or keyword.
+            window_minutes: Duration of each sliding window in minutes.
+            reference_time: Evaluation end time (defaults to latest post timestamp or now).
+            
+        Returns:
+            NarrativeDriftAlert evaluating drift between baseline and active windows.
+        """
+        ref_time = reference_time
+        if ref_time is None:
+            max_ts_row = db.con.execute("SELECT MAX(timestamp) FROM posts").fetchone()
+            if max_ts_row and max_ts_row[0]:
+                ref_time = max_ts_row[0]
+            else:
+                ref_time = datetime.now(timezone.utc)
+
+        if ref_time.tzinfo is None:
+            ref_time = ref_time.replace(tzinfo=timezone.utc)
+
+        from datetime import timedelta
+        w_delta = timedelta(minutes=float(window_minutes))
+        w2_end = ref_time
+        w2_start = ref_time - w_delta
+        w1_end = w2_start
+        w1_start = w1_end - w_delta
+
+        return self.track_drift_from_db(
+            db=db,
+            topic=topic,
+            window_1_start=w1_start,
+            window_1_end=w1_end,
+            window_2_start=w2_start,
+            window_2_end=w2_end,
         )

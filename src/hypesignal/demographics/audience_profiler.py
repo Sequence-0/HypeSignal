@@ -223,3 +223,13 @@ class InfluencerAudienceProfiler:
             engagement_tier_distribution=filtered_tier,
             follower_profiles=profiles if include_profiles else None,
         )
+
+    def profile_audience(
+        self,
+        user_id: str,
+        limit: int = 1000,
+        include_profiles: bool = False,
+        **kwargs: Any,
+    ) -> InfluencerAudienceProfile:
+        """Alias for profile_influencer_audience."""
+        return self.profile_influencer_audience(influencer_id=user_id, limit=limit, include_profiles=include_profiles)

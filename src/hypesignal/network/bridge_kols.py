@@ -41,6 +41,9 @@ class BridgeKOLLeaderboard(BaseModel):
     computed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+BridgeKOLAnalysisResult = BridgeKOLLeaderboard
+
+
 class BridgeKOLAnalyzer:
     """Identifies and ranks boundary spanners bridging distinct network communities."""
 
