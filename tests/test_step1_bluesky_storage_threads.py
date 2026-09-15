@@ -279,3 +279,30 @@ def test_conversation_thread_manager_hierarchy(mem_db):
 
     # 4. Non-existent root returns None
     assert manager.reconstruct_thread("non_existent_id") is None
+
+
+def test_bluesky_connector_thread_and_lifecycle():
+    """Test BlueskyConnector reusable client lifecycle and get_post_thread method."""
+    config = ConnectorConfig(
+        platform="bluesky",
+        enabled=True,
+        credentials={"mock": True},
+        rate_limit_per_second=10.0,
+        rate_limit_burst=20.0,
+    )
+    connector = BlueskyConnector(config=config)
+    assert connector.connect() is True
+    assert connector._http_client is not None
+
+    thread_posts = connector.get_post_thread("at://did:plc:test/app.bsky.feed.post/root_post_xyz", depth=4)
+    assert len(thread_posts) >= 2
+    root = thread_posts[0]
+    reply = thread_posts[1]
+    assert root.id == "root_post_xyz"
+    assert reply.parent_id == "root_post_xyz"
+    assert root.platform == PlatformType.BLUESKY
+    assert reply.platform == PlatformType.BLUESKY
+
+    assert connector.disconnect() is True
+    assert connector._http_client is None
+

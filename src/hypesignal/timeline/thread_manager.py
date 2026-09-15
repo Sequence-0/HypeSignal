@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
@@ -122,7 +122,7 @@ class ConversationThreadManager:
         root_node = nodes_map[root_post_id]
         root_node.depth = 0
 
-        queue: List[str] = [root_post_id]
+        queue: deque[str] = deque([root_post_id])
         max_depth = 0
         depth_counts: Dict[int, int] = defaultdict(int)
         depth_counts[0] = 1
@@ -130,7 +130,7 @@ class ConversationThreadManager:
         reply_latencies: List[float] = []
 
         while queue:
-            curr_id = queue.pop(0)
+            curr_id = queue.popleft()
             curr_node = nodes_map[curr_id]
             curr_depth = curr_node.depth
             max_depth = max(max_depth, curr_depth)

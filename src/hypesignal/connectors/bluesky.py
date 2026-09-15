@@ -31,6 +31,21 @@ class BlueskyConnector(PlatformConnector):
     ) -> None:
         """Initialize Bluesky connector."""
         super().__init__(config=config)
+        self._http_client: Optional[httpx.Client] = None
+
+    def _get_client(self) -> httpx.Client:
+        """Get or create reusable HTTPX client."""
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.Client(timeout=10.0)
+        return self._http_client
+
+    def _do_connect(self) -> None:
+        self._get_client()
+
+    def _do_disconnect(self) -> None:
+        if self._http_client and not self._http_client.is_closed:
+            self._http_client.close()
+        self._http_client = None
 
     @property
     def platform(self) -> PlatformType:
@@ -189,22 +204,22 @@ class BlueskyConnector(PlatformConnector):
                 # Public AT Protocol search endpoint (no authentication required)
                 endpoint = f"{BSKY_PUBLIC_API_URL}/app.bsky.feed.searchPosts"
                 params = {"q": query_term, "limit": min(limit, 100)}
-                with httpx.Client(timeout=10.0) as client:
-                    resp = client.get(endpoint, params=params)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        raw_posts = data.get("posts", [])
-                        for item in raw_posts:
-                            try:
-                                post = self.normalize_post(item)
-                                posts.append(post)
-                            except Exception as parse_err:
-                                logger.debug("Skipping malformed Bluesky post: %s", parse_err)
-                        if posts:
-                            self.record_success(len(posts))
-                            return posts[:limit]
-                    else:
-                        logger.warning("Bluesky public API returned %d: %s", resp.status_code, resp.text)
+                client = self._get_client()
+                resp = client.get(endpoint, params=params)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    raw_posts = data.get("posts", [])
+                    for item in raw_posts:
+                        try:
+                            post = self.normalize_post(item)
+                            posts.append(post)
+                        except Exception as parse_err:
+                            logger.debug("Skipping malformed Bluesky post: %s", parse_err)
+                    if posts:
+                        self.record_success(len(posts))
+                        return posts[:limit]
+                else:
+                    logger.warning("Bluesky public API returned %d: %s", resp.status_code, resp.text)
             except Exception as e:
                 logger.info("Bluesky live HTTP request not reachable (%s); falling back to mock generator.", e)
 
@@ -264,3 +279,96 @@ class BlueskyConnector(PlatformConnector):
 
         self.record_success(len(posts))
         return posts[:limit]
+
+    def get_post_thread(self, post_uri: str, depth: int = 6) -> List[CanonicalPost]:
+        """Fetch an AT Protocol conversation thread starting from post_uri.
+        
+        Uses app.bsky.feed.getPostThread or returns synthetic thread in mock mode.
+        """
+        if not self.rate_limiter.acquire(1.0):
+            self.record_rate_limited()
+            return []
+
+        self.record_request()
+        use_mock = self.config.credentials.get("mock", False)
+
+        posts: List[CanonicalPost] = []
+        if not use_mock:
+            try:
+                endpoint = f"{BSKY_PUBLIC_API_URL}/app.bsky.feed.getPostThread"
+                params = {"uri": post_uri, "depth": depth}
+                client = self._get_client()
+                resp = client.get(endpoint, params=params)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    thread_data = data.get("thread", {})
+
+                    def _traverse(node: Dict[str, Any]) -> None:
+                        if not isinstance(node, dict):
+                            return
+                        post_obj = node.get("post")
+                        if post_obj:
+                            try:
+                                posts.append(self.normalize_post(post_obj))
+                            except Exception as pe:
+                                logger.debug("Skipping unparseable thread node: %s", pe)
+                        for reply in node.get("replies", []):
+                            _traverse(reply)
+
+                    _traverse(thread_data)
+                    if posts:
+                        self.record_success(len(posts))
+                        return posts
+            except Exception as e:
+                logger.info("Bluesky getPostThread live HTTP request failed (%s); falling back to mock.", e)
+
+        # Mock fallback
+        now = datetime.now(timezone.utc)
+        root_post_id = post_uri.split("/app.bsky.feed.post/")[-1] if "/app.bsky.feed.post/" in post_uri else "bsky_thread_root"
+        reply_post_id = f"bsky_reply_{int(now.timestamp())}"
+
+        mock_root = {
+            "uri": f"at://did:plc:mockauthor/app.bsky.feed.post/{root_post_id}",
+            "cid": "bafythreadroot",
+            "author": {
+                "did": "did:plc:mockauthor",
+                "handle": "threadauthor.bsky.social",
+                "displayName": "Thread Author",
+            },
+            "record": {
+                "$type": "app.bsky.feed.post",
+                "text": "Starting a discussion on social network decentralization #bluesky",
+                "createdAt": now.isoformat(),
+            },
+            "likeCount": 25,
+            "repostCount": 5,
+            "replyCount": 1,
+            "quoteCount": 0,
+        }
+
+        mock_reply = {
+            "uri": f"at://did:plc:mockreplier/app.bsky.feed.post/{reply_post_id}",
+            "cid": "bafythreadreply",
+            "author": {
+                "did": "did:plc:mockreplier",
+                "handle": "replier.bsky.social",
+                "displayName": "Decentralized Fan",
+            },
+            "record": {
+                "$type": "app.bsky.feed.post",
+                "text": "Agreed, the AT Protocol architecture is truly groundbreaking!",
+                "createdAt": now.isoformat(),
+                "reply": {
+                    "root": {"uri": mock_root["uri"]},
+                    "parent": {"uri": mock_root["uri"]},
+                },
+            },
+            "likeCount": 8,
+            "repostCount": 2,
+            "replyCount": 0,
+            "quoteCount": 0,
+        }
+
+        posts = [self.normalize_post(mock_root), self.normalize_post(mock_reply)]
+        self.record_success(len(posts))
+        return posts

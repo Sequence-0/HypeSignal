@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import duckdb
 import polars as pl
@@ -418,13 +418,21 @@ class DuckDBManager:
         self,
         start_time: datetime,
         end_time: datetime,
+        include_undated: bool = True,
     ) -> pl.DataFrame:
         """Query graph edges created or active within a time window."""
-        query = """
-            SELECT * FROM graph_edges
-            WHERE timestamp IS NULL OR (timestamp >= ? AND timestamp <= ?)
-            ORDER BY timestamp ASC NULLS FIRST;
-        """
+        if include_undated:
+            query = """
+                SELECT * FROM graph_edges
+                WHERE timestamp IS NULL OR (timestamp >= ? AND timestamp <= ?)
+                ORDER BY timestamp ASC NULLS FIRST;
+            """
+        else:
+            query = """
+                SELECT * FROM graph_edges
+                WHERE timestamp IS NOT NULL AND timestamp >= ? AND timestamp <= ?
+                ORDER BY timestamp ASC;
+            """
         return self.con.execute(query, [start_time, end_time]).pl()
 
     def get_active_nodes_in_window(
