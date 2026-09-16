@@ -57,7 +57,13 @@ class _TelegramLoopThread:
 
     def stop(self) -> None:
         if self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._loop.stop)
+            def _cancel_and_stop() -> None:
+                tasks = [t for t in asyncio.all_tasks(self._loop) if not t.done()]
+                for task in tasks:
+                    task.cancel()
+                self._loop.stop()
+
+            self._loop.call_soon_threadsafe(_cancel_and_stop)
             self._thread.join(timeout=2.0)
 
 
@@ -284,9 +290,12 @@ class TelegramConnector(PlatformConnector):
             self._loop_thread = None
 
     def __del__(self) -> None:
-        """Ensure clean teardown on garbage collection."""
+        """Ensure teardown on garbage collection without blocking thread joins."""
         try:
-            self.disconnect()
+            # Avoid calling self.disconnect() if loop thread join would deadlock GC.
+            # Explicit teardown via disconnect() or context manager is preferred.
+            if self._loop_thread and self._loop_thread.loop.is_running():
+                self._loop_thread.loop.call_soon_threadsafe(self._loop_thread.loop.stop)
         except Exception:
             pass
 
@@ -401,8 +410,11 @@ class TelegramConnector(PlatformConnector):
         elif isinstance(date_raw, str):
             try:
                 ts = datetime.fromisoformat(date_raw.replace("Z", "+00:00"))
-            except ValueError:
-                ts = datetime.fromtimestamp(float(date_raw), tz=timezone.utc)
+            except (ValueError, TypeError):
+                try:
+                    ts = datetime.fromtimestamp(float(date_raw), tz=timezone.utc)
+                except (ValueError, TypeError, OverflowError):
+                    ts = datetime.now(timezone.utc)
         else:
             ts = datetime.now(timezone.utc)
 

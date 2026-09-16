@@ -303,8 +303,8 @@ class BlueskyConnector(PlatformConnector):
                     data = resp.json()
                     thread_data = data.get("thread", {})
 
-                    def _traverse(node: Dict[str, Any]) -> None:
-                        if not isinstance(node, dict):
+                    def _traverse(node: Dict[str, Any], curr_d: int = 0) -> None:
+                        if not isinstance(node, dict) or curr_d > 50:
                             return
                         post_obj = node.get("post")
                         if post_obj:
@@ -313,9 +313,9 @@ class BlueskyConnector(PlatformConnector):
                             except Exception as pe:
                                 logger.debug("Skipping unparseable thread node: %s", pe)
                         for reply in node.get("replies", []):
-                            _traverse(reply)
+                            _traverse(reply, curr_d + 1)
 
-                    _traverse(thread_data)
+                    _traverse(thread_data, curr_d=0)
                     if posts:
                         self.record_success(len(posts))
                         return posts

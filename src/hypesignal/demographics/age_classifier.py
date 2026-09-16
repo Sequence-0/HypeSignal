@@ -364,26 +364,23 @@ class MultiStageAgeClassifier:
         if s3_dist:
             stage_scores["stage3_nli"] = s3_dist
 
-        # 4. Stage 4: Weighted Ensembling
+        # 4. Stage 4: Weighted Ensembling (Bio Vector + Post NLI)
         if s3_dist is not None:
-            w1 = 0.0
             w2 = 0.60
             w3 = 0.40
             primary_src = "ensemble"
         else:
-            w1 = 0.0
             w2 = 1.0
             w3 = 0.0
             primary_src = "bio_vector"
 
         final_probs: Dict[str, float] = {}
-        total_w = w1 + w2 + w3
+        total_w = w2 + w3
 
         for b in AGE_BRACKETS:
-            p1 = s1_dist.get(b, 0.0) if s1_dist else 0.0
             p2 = s2_dist.get(b, 0.0)
             p3 = s3_dist.get(b, 0.0) if s3_dist else 0.0
-            final_probs[b] = round((w1 * p1 + w2 * p2 + w3 * p3) / total_w, 4)
+            final_probs[b] = round((w2 * p2 + w3 * p3) / total_w, 4)
 
         # Normalize and correct rounding drift on dominant key
         prob_sum = sum(final_probs.values())

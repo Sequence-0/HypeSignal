@@ -7,6 +7,7 @@ and nuanced emotional trajectories across time buckets in DuckDB and Polars.
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -31,6 +32,17 @@ class TemporalSentimentTracker:
         """Initialize tracker with NLP inference engine and optional DuckDB store."""
         self.engine = engine
         self.db = db
+        self._mem_db: Optional[DuckDBManager] = None
+        self._lock = threading.Lock()
+
+    def _get_db(self) -> DuckDBManager:
+        """Get shared DuckDB instance or cached in-memory store."""
+        if self.db is not None:
+            return self.db
+        with self._lock:
+            if self._mem_db is None:
+                self._mem_db = DuckDBManager(":memory:")
+            return self._mem_db
 
     def compute_timeline_fluctuations(
         self,
@@ -73,10 +85,9 @@ class TemporalSentimentTracker:
             pl.Series("primary_emotion", emotions),
         ])
 
-        # Use an in-memory DuckDB instance to compute time-bucketed aggregations
-        temp_db = DuckDBManager(":memory:")
+        # Use reused DuckDB instance to compute time-bucketed aggregations
+        db = self._get_db()
         arrow_table = enriched_df.to_arrow()
-        temp_db.con.register("tmp_enriched", arrow_table)
 
         query = f"""
             SELECT 
@@ -97,8 +108,12 @@ class TemporalSentimentTracker:
             GROUP BY bucket
             ORDER BY bucket ASC
         """
-        aggregated_df = temp_db.con.execute(query).pl()
-        temp_db.close()
+        with self._lock:
+            db.con.register("tmp_enriched", arrow_table)
+            try:
+                aggregated_df = db.con.execute(query).pl()
+            finally:
+                db.con.unregister("tmp_enriched")
 
         return aggregated_df
 

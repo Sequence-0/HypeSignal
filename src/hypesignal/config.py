@@ -56,12 +56,22 @@ def _parse_env_file(filepath: Path) -> Dict[str, str]:
         key = key.strip()
         val = val.strip()
 
-        # Strip enclosing single or double quotes
-        if len(val) >= 2 and (
-            (val.startswith('"') and val.endswith('"'))
-            or (val.startswith("'") and val.endswith("'"))
-        ):
-            val = val[1:-1]
+        # Handle quoted values (preserving hashes inside quotes) with optional trailing comments
+        if val.startswith('"'):
+            end_quote = val.find('"', 1)
+            if end_quote != -1:
+                val = val[1:end_quote]
+            else:
+                val = val[1:]
+        elif val.startswith("'"):
+            end_quote = val.find("'", 1)
+            if end_quote != -1:
+                val = val[1:end_quote]
+            else:
+                val = val[1:]
+        else:
+            # Strip unquoted inline comments
+            val = val.partition("#")[0].strip()
 
         if key:
             loaded[key] = val

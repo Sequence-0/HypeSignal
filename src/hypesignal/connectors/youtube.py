@@ -75,9 +75,8 @@ class YouTubeConnector(PlatformConnector):
             self._owns_client = True
         return self._http_client
 
-    def disconnect(self) -> None:
+    def _do_disconnect(self) -> None:
         """Disconnect and release HTTP client."""
-        super().disconnect()
         if self._owns_client and self._http_client and not self._http_client.is_closed:
             self._http_client.close()
 

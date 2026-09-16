@@ -123,6 +123,7 @@ class ConversationThreadManager:
         root_node.depth = 0
 
         queue: deque[str] = deque([root_post_id])
+        visited: set[str] = {root_post_id}
         max_depth = 0
         depth_counts: Dict[int, int] = defaultdict(int)
         depth_counts[0] = 1
@@ -136,6 +137,9 @@ class ConversationThreadManager:
             max_depth = max(max_depth, curr_depth)
 
             for child_id in children_by_parent.get(curr_id, []):
+                if child_id in visited:
+                    continue
+                visited.add(child_id)
                 child_node = nodes_map[child_id]
                 child_node.depth = curr_depth + 1
                 curr_node.children.append(child_node)
@@ -148,7 +152,11 @@ class ConversationThreadManager:
                 queue.append(child_id)
 
         # Sort children of each node chronologically
+        sort_visited: set[str] = set()
         def sort_children(node: ThreadNode) -> None:
+            if node.post_id in sort_visited:
+                return
+            sort_visited.add(node.post_id)
             node.children.sort(key=lambda c: c.timestamp)
             for c in node.children:
                 sort_children(c)

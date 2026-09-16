@@ -66,26 +66,35 @@ class AnalyticsPipelineOrchestrator:
         self._stop_event = asyncio.Event()
 
     async def run_ingestion_stage(self, query: str = "news", limit: int = 10) -> int:
-        """Stage 1: Poll enabled connectors and store raw posts to DuckDB."""
-        total_ingested = 0
-        for name, connector in list(self.connectors.items()):
-            if not getattr(connector.config, "enabled", True):
-                continue
+        """Stage 1: Poll enabled connectors concurrently and store raw posts to DuckDB."""
+        enabled_connectors = [
+            (name, conn)
+            for name, conn in list(self.connectors.items())
+            if getattr(conn.config, "enabled", True)
+        ]
+        if not enabled_connectors:
+            return 0
 
+        async def _poll_single(name: str, connector: Any) -> int:
             try:
-                # Wrap synchronous connector poll in asyncio.to_thread
                 posts = await asyncio.to_thread(connector.poll, query=query, limit=limit)
                 if posts:
                     await asyncio.to_thread(self.db.insert_posts, posts)
-                    total_ingested += len(posts)
                     if self.broadcaster:
                         self.broadcaster.broadcast(
                             {"connector": name, "ingested_count": len(posts)},
                             event_type="ingestion",
                         )
+                    return len(posts)
             except Exception as e:
                 logger.warning("Ingestion stage error for connector '%s': %s", name, e)
+            return 0
 
+        results = await asyncio.gather(
+            *[_poll_single(name, conn) for name, conn in enabled_connectors],
+            return_exceptions=True,
+        )
+        total_ingested = sum(r for r in results if isinstance(r, int))
         return total_ingested
 
     async def run_enrichment_stage(self, limit: Optional[int] = None) -> int:

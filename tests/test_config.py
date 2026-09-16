@@ -30,6 +30,8 @@ def test_parse_env_file_syntax(tmp_path: Path):
         # Inactive key
         # COMMENTED_OUT=123
         SPACED_KEY  =  trimmed_value  
+        INLINE_COMMENT=true # this is a comment
+        QUOTED_WITH_COMMENT="hello world" # trailing comment
         """,
         encoding="utf-8",
     )
@@ -41,6 +43,8 @@ def test_parse_env_file_syntax(tmp_path: Path):
     assert parsed["QUOTED_SINGLE"] == "single quoted"
     assert parsed["EMPTY_VAL"] == ""
     assert parsed["SPACED_KEY"] == "trimmed_value"
+    assert parsed["INLINE_COMMENT"] == "true"
+    assert parsed["QUOTED_WITH_COMMENT"] == "hello world"
     assert "COMMENTED_OUT" not in parsed
 
 

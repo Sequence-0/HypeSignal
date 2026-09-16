@@ -67,6 +67,7 @@ def create_app(
     """Create and configure the unified HypeSignal FastAPI application."""
     load_env()
     app_db = db
+    owns_db = (db is None)
     app_vector = vector_store
     app_timeline = timeline
     app_nlp = nlp
@@ -245,6 +246,12 @@ def create_app(
             if conn.is_connected():
                 conn.disconnect()
 
+        if owns_db and app_db is not None:
+            try:
+                app_db.close()
+            except Exception as e:
+                logger.warning("Error closing DuckDB connection on shutdown: %s", e)
+
     app = FastAPI(
         title=title,
         version=version,
@@ -274,9 +281,13 @@ def create_app(
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
         logger.exception("Unhandled server exception: %s", exc)
+        is_debug = os.getenv("HYPESIGNAL_DEBUG", "false").lower() in ("1", "true", "yes")
+        err_body = {"detail": "An internal server error occurred."}
+        if is_debug:
+            err_body["error"] = str(exc)
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"detail": "An internal server error occurred.", "error": str(exc)},
+            content=err_body,
         )
 
     # Healthcheck endpoints
