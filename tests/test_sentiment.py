@@ -28,7 +28,7 @@ def test_genuine_sentiment_and_emotions(nlp_engine: MultiDimensionalSentimentEng
 
     # Positive sample
     assert results[0].effective_polarity == SentimentPolarity.POSITIVE
-    assert results[0].emotion.primary_emotion in [EmotionType.JOY, EmotionType.SURPRISE]
+    assert results[0].emotion.primary_emotion in [EmotionType.JOY, EmotionType.SURPRISE, EmotionType.EXCITEMENT]
     assert results[0].is_sarcasm_inverted is False
 
     # Negative sample

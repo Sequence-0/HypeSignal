@@ -10,10 +10,16 @@ from hypesignal.nlp.schemas import (
     StancePrediction,
 )
 from hypesignal.nlp.temporal_sentiment import TemporalSentimentTracker
+from hypesignal.nlp.thread_sentiment import (
+    ThreadSentimentAnalysis,
+    ThreadSentimentAnalyzer,
+)
 
 __all__ = [
     "MultiDimensionalSentimentEngine",
     "TemporalSentimentTracker",
+    "ThreadSentimentAnalysis",
+    "ThreadSentimentAnalyzer",
     "ModelBenchmarkEvaluator",
     "SentimentPrediction",
     "IronyPrediction",

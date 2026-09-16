@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import duckdb
 import polars as pl
@@ -99,13 +99,45 @@ class DuckDBManager:
                 PRIMARY KEY (source_id, target_id, relation_type)
             );
 
+            CREATE TABLE IF NOT EXISTS post_analytics (
+                post_id VARCHAR PRIMARY KEY,
+                effective_polarity VARCHAR NOT NULL,
+                sentiment_score DOUBLE NOT NULL,
+                is_sarcastic BOOLEAN NOT NULL,
+                irony_score DOUBLE NOT NULL,
+                primary_emotion VARCHAR NOT NULL,
+                emotion_score DOUBLE NOT NULL,
+                joy DOUBLE DEFAULT 0.0,
+                optimism DOUBLE DEFAULT 0.0,
+                anger DOUBLE DEFAULT 0.0,
+                sadness DOUBLE DEFAULT 0.0,
+                fear DOUBLE DEFAULT 0.0,
+                anxiety DOUBLE DEFAULT 0.0,
+                excitement DOUBLE DEFAULT 0.0,
+                surprise DOUBLE DEFAULT 0.0,
+                disgust DOUBLE DEFAULT 0.0,
+                neutral DOUBLE DEFAULT 0.0,
+                stance VARCHAR DEFAULT 'neutral',
+                stance_score DOUBLE DEFAULT 0.0,
+                analyzed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS user_communities (
+                user_id VARCHAR PRIMARY KEY,
+                community_id INTEGER NOT NULL,
+                modularity_score DOUBLE DEFAULT 0.0,
+                assigned_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE INDEX IF NOT EXISTS idx_posts_time ON posts (timestamp);
             CREATE INDEX IF NOT EXISTS idx_posts_time_ms ON posts (timestamp_ms);
             CREATE INDEX IF NOT EXISTS idx_posts_author ON posts (author_id);
+            CREATE INDEX IF NOT EXISTS idx_posts_parent_id ON posts (parent_id);
             CREATE INDEX IF NOT EXISTS idx_cascades_id_time ON cascade_events (cascade_id, timestamp_ms);
             CREATE INDEX IF NOT EXISTS idx_users_platform ON users (platform, id);
             CREATE INDEX IF NOT EXISTS idx_edges_source ON graph_edges (source_id);
             CREATE INDEX IF NOT EXISTS idx_edges_target ON graph_edges (target_id);
+            CREATE INDEX IF NOT EXISTS idx_user_communities_comm ON user_communities (community_id);
         """)
 
     def insert_posts(self, posts: List[CanonicalPost]) -> None:
@@ -294,6 +326,9 @@ class DuckDBManager:
         """)
         self.con.unregister("tmp_edges_arrow")
 
+    # Alias for API compatibility
+    insert_graph_edges = insert_edges
+
     def get_edges_count(self) -> int:
         """Get total number of graph edges stored."""
         return self.con.execute("SELECT COUNT(*) FROM graph_edges").fetchone()[0]
@@ -301,7 +336,7 @@ class DuckDBManager:
     def get_user_followers(self, user_id: str) -> List[str]:
         """Get list of follower user IDs for a given target user."""
         rows = self.con.execute(
-            "SELECT source_id FROM graph_edges WHERE target_id = ? AND relation_type = 'FOLLOWS'",
+            "SELECT source_id FROM graph_edges WHERE target_id = ? AND LOWER(relation_type) = 'follows'",
             [user_id],
         ).fetchall()
         return [r[0] for r in rows]
@@ -309,7 +344,7 @@ class DuckDBManager:
     def get_user_following(self, user_id: str) -> List[str]:
         """Get list of followee user IDs that a given user follows."""
         rows = self.con.execute(
-            "SELECT target_id FROM graph_edges WHERE source_id = ? AND relation_type = 'FOLLOWS'",
+            "SELECT target_id FROM graph_edges WHERE source_id = ? AND LOWER(relation_type) = 'follows'",
             [user_id],
         ).fetchall()
         return [r[0] for r in rows]
@@ -328,26 +363,41 @@ class DuckDBManager:
 
     def get_posts_in_window(
         self,
-        start_time: datetime,
-        end_time: datetime,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
         platform: Optional[str] = None,
+        keyword: Optional[str] = None,
+        parent_id: Optional[str] = None,
+        author_id: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> pl.DataFrame:
-        """Query posts within a specific time window as a Polars DataFrame."""
-        query = """
-            SELECT * FROM posts 
-            WHERE timestamp >= ? AND timestamp <= ?
-        """
-        params: List[Any] = [start_time, end_time]
+        """Query posts within an optional time window with keyword, parent/video, platform, and author filters."""
+        where_clauses: List[str] = []
+        params: List[Any] = []
 
+        if start_time is not None:
+            where_clauses.append("timestamp >= ?")
+            params.append(start_time)
+        if end_time is not None:
+            where_clauses.append("timestamp <= ?")
+            params.append(end_time)
         if platform:
-            query += " AND platform = ?"
+            where_clauses.append("LOWER(platform) = LOWER(?)")
             params.append(platform)
+        if keyword:
+            where_clauses.append("(text ILIKE ? OR CAST(hashtags AS VARCHAR) ILIKE ?)")
+            kw = f"%{keyword}%"
+            params.extend([kw, kw])
+        if parent_id:
+            where_clauses.append("(parent_id = ? OR id = ? OR parent_id = ? OR CAST(urls AS VARCHAR) ILIKE ?)")
+            params.extend([parent_id, parent_id, f"video_{parent_id}", f"%{parent_id}%"])
+        if author_id:
+            where_clauses.append("author_id = ?")
+            params.append(author_id)
 
-        query += " ORDER BY timestamp ASC"
-
-        if limit:
-            query += f" LIMIT {int(limit)}"
+        where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        limit_sql = f" LIMIT {int(limit)}" if limit else ""
+        query = f"SELECT * FROM posts {where_sql} ORDER BY timestamp ASC{limit_sql}"
 
         res = self.con.execute(query, params).pl()
         return res
@@ -361,6 +411,168 @@ class DuckDBManager:
         """
         return self.con.execute(query, [cascade_id]).pl()
 
+    def get_conversation_thread(self, root_post_id: str) -> pl.DataFrame:
+        """Retrieve the entire conversation tree starting from a root post using recursive CTE."""
+        query = """
+            WITH RECURSIVE thread_tree AS (
+                SELECT * FROM posts WHERE id = ?
+                UNION ALL
+                SELECT p.* FROM posts p
+                JOIN thread_tree t ON p.parent_id = t.id
+            )
+            SELECT * FROM thread_tree ORDER BY timestamp ASC;
+        """
+        return self.con.execute(query, [root_post_id]).pl()
+
+    def get_comment_children(self, parent_id: str) -> pl.DataFrame:
+        """Retrieve direct replies/comments for a parent post."""
+        query = "SELECT * FROM posts WHERE parent_id = ? ORDER BY timestamp ASC;"
+        return self.con.execute(query, [parent_id]).pl()
+
+    def get_graph_edges_in_window(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        include_undated: bool = True,
+    ) -> pl.DataFrame:
+        """Query graph edges created or active within a time window."""
+        if include_undated:
+            query = """
+                SELECT * FROM graph_edges
+                WHERE timestamp IS NULL OR (timestamp >= ? AND timestamp <= ?)
+                ORDER BY timestamp ASC NULLS FIRST;
+            """
+        else:
+            query = """
+                SELECT * FROM graph_edges
+                WHERE timestamp IS NOT NULL AND timestamp >= ? AND timestamp <= ?
+                ORDER BY timestamp ASC;
+            """
+        return self.con.execute(query, [start_time, end_time]).pl()
+
+    def get_active_nodes_in_window(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> List[str]:
+        """Get unique user IDs who authored posts within the specified time window."""
+        query = """
+            SELECT DISTINCT author_id FROM posts
+            WHERE timestamp >= ? AND timestamp <= ?;
+        """
+        rows = self.con.execute(query, [start_time, end_time]).fetchall()
+        return [r[0] for r in rows]
+
+    def upsert_post_analytics(self, analytics_rows: List[Dict[str, Any]]) -> None:
+        """Insert or replace analytics records in the post_analytics table."""
+        if not analytics_rows:
+            return
+
+        default_row = {
+            "effective_polarity": "neutral",
+            "sentiment_score": 0.0,
+            "is_sarcastic": False,
+            "irony_score": 0.0,
+            "primary_emotion": "neutral",
+            "emotion_score": 0.0,
+            "joy": 0.0,
+            "optimism": 0.0,
+            "anger": 0.0,
+            "sadness": 0.0,
+            "fear": 0.0,
+            "anxiety": 0.0,
+            "excitement": 0.0,
+            "surprise": 0.0,
+            "disgust": 0.0,
+            "neutral": 0.0,
+            "stance": "neutral",
+            "stance_score": 0.0,
+        }
+
+        standardized = [
+            {
+                "post_id": str(r["post_id"]),
+                **default_row,
+                **{k: v for k, v in r.items() if k != "post_id"},
+            }
+            for r in analytics_rows
+        ]
+
+        df = pl.DataFrame(standardized)
+        self.con.register("tmp_analytics_batch", df.to_arrow())
+        self.con.execute("""
+            INSERT OR REPLACE INTO post_analytics
+            SELECT 
+                CAST(post_id AS VARCHAR),
+                CAST(effective_polarity AS VARCHAR),
+                CAST(sentiment_score AS DOUBLE),
+                CAST(is_sarcastic AS BOOLEAN),
+                CAST(irony_score AS DOUBLE),
+                CAST(primary_emotion AS VARCHAR),
+                CAST(emotion_score AS DOUBLE),
+                CAST(joy AS DOUBLE),
+                CAST(optimism AS DOUBLE),
+                CAST(anger AS DOUBLE),
+                CAST(sadness AS DOUBLE),
+                CAST(fear AS DOUBLE),
+                CAST(anxiety AS DOUBLE),
+                CAST(excitement AS DOUBLE),
+                CAST(surprise AS DOUBLE),
+                CAST(disgust AS DOUBLE),
+                CAST(neutral AS DOUBLE),
+                CAST(stance AS VARCHAR),
+                CAST(stance_score AS DOUBLE),
+                CURRENT_TIMESTAMP
+            FROM tmp_analytics_batch;
+        """)
+        self.con.unregister("tmp_analytics_batch")
+
+    def get_post_analytics(self, post_ids: Optional[List[str]] = None) -> pl.DataFrame:
+        """Retrieve post analytics records optionally filtered by post IDs."""
+        if post_ids is not None:
+            if not post_ids:
+                return pl.DataFrame()
+            placeholders = ",".join(["?"] * len(post_ids))
+            return self.con.execute(
+                f"SELECT * FROM post_analytics WHERE post_id IN ({placeholders})",
+                post_ids,
+            ).pl()
+        return self.con.execute("SELECT * FROM post_analytics ORDER BY analyzed_at DESC").pl()
+
+    def get_post_analytics_count(self) -> int:
+        """Get total number of analyzed posts in post_analytics table."""
+        return self.con.execute("SELECT COUNT(*) FROM post_analytics").fetchone()[0]
+
+    def upsert_user_communities(self, assignments: List[Tuple[str, int, float]]) -> None:
+        """Insert or replace user community assignments.
+        
+        Args:
+            assignments: List of (user_id, community_id, modularity_score) tuples.
+        """
+        if not assignments:
+            return
+
+        records = [
+            {"user_id": u, "community_id": c, "modularity_score": float(m)}
+            for u, c, m in assignments
+        ]
+        df = pl.DataFrame(records)
+        self.con.register("tmp_user_comm_batch", df.to_arrow())
+        self.con.execute("""
+            INSERT OR REPLACE INTO user_communities
+            SELECT user_id, community_id, modularity_score, CURRENT_TIMESTAMP
+            FROM tmp_user_comm_batch;
+        """)
+        self.con.unregister("tmp_user_comm_batch")
+
+    def get_user_communities(self) -> pl.DataFrame:
+        """Retrieve all persisted user community assignments."""
+        return self.con.execute("SELECT * FROM user_communities ORDER BY community_id ASC").pl()
+
+    def get_user_communities_count(self) -> int:
+        """Get total count of users assigned to communities."""
+        return self.con.execute("SELECT COUNT(*) FROM user_communities").fetchone()[0]
+
     def query(self, sql: str, params: Optional[List[Any]] = None) -> pl.DataFrame:
         """Execute arbitrary SQL and return results as Polars DataFrame."""
         if params:
@@ -370,3 +582,4 @@ class DuckDBManager:
     def close(self) -> None:
         """Close connection to DuckDB."""
         self.con.close()
+

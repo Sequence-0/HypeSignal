@@ -1,0 +1,38 @@
+AI-driven Social Media Analytics Framework that processes raw platform data to extract
+deep, actionable audience insights. The system must leverage advanced Artificial
+Intelligence and Machine Learning techniques to simultaneously infer follower sentiment,
+map audience demographics, identify top trending narratives, and perform link/network
+analysis to uncover how information and influence flow among followers.
+
+• Expected Solution AI solution must address the following five core components:
+
+A. Continuous Data Collection & Timeline Management: Design a multi-platform data
+ingestion pipeline capable of pulling live data, posts, user interactions, and comments.
+The architecture must support a structured, time-stamped historical database to map out
+the exact chronology of conversations. The pipeline platform requirements are
+categorized as follows:
+
+• Essentials (Must-Have): X (formerly Twitter) & Telegram.
+
+• Desirable (Good-to-Have): Instagram & Facebook.
+
+• Appreciable Additions: Reddit or YouTube (for extracting text-based context from video
+comments).
+
+B. Multi-Dimensional Sentiment Inference: Use Natural Language Processing (NLP) to
+detect nuanced emotions (e.g., sarcasm, anxiety, excitement, supportive, against etc.)
+within user posts and comment threads, mapping how these sentiments fluctuate along the
+established data timeline.
+
+C. Automated Demographic Profiling: Develop models to infer aggregate, anonymized
+follower demographics (such as age brackets, geographic distribution, language, and
+professional interests) based on public profile indicators, bio text, behavioral
+patterns etc.
+
+D. Real-Time Trend & Topic Detection: Automatically identify, rank, and predict rising
+trends, viral keywords, and shifting discussions as they emerge chronologically in the
+dataset.
+
+E. Link Analysis & Network Topology: Map the relationships among followers. Identify
+'nodes of high influence' (key opinion leaders) and visualize how a trend or sentiment
+spreads from one user segment to another over time.

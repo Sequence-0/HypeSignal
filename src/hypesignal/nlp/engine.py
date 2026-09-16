@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -38,6 +38,63 @@ def preprocess_tweet(text: str) -> str:
         t = "http" if t.startswith("http") else t
         new_text.append(t)
     return " ".join(new_text).strip()
+
+
+# Explicit lexical & arousal calibration markers for nuanced emotion isolation
+ANXIETY_STRONG_MARKERS: Set[str] = {
+    "panic", "panicked", "panicking", "terrified", "terrifying", "dread", "dreading",
+    "anxiety", "anxious", "anxiously", "paralyzed", "horrified", "freaking out",
+}
+ANXIETY_MODERATE_MARKERS: Set[str] = {
+    "worried", "worry", "worrying", "nervous", "stressed", "stressful", "stress",
+    "uneasy", "apprehensive", "fearful", "troubled", "concerned", "overwhelmed", "hesitant", "distressed",
+}
+
+EXCITEMENT_STRONG_MARKERS: Set[str] = {
+    "hyped", "hype", "ecstatic", "thrilled", "thrilling", "pumped", "electrifying",
+    "unbelievable", "epic", "insane", "fire", "🚀", "🔥", "breathtaking", "phenomenal",
+}
+EXCITEMENT_MODERATE_MARKERS: Set[str] = {
+    "excited", "exciting", "excitement", "can't wait", "cant wait", "amazing", "great",
+    "fantastic", "awesome", "eager", "enthusiastic", "stoked", "delighted", "energized",
+}
+
+OPTIMISM_STRONG_MARKERS: Set[str] = {
+    "hope", "hopeful", "optimistic", "optimism", "promising", "bright future",
+}
+OPTIMISM_MODERATE_MARKERS: Set[str] = {
+    "looking forward", "progress", "confident", "positive outlook",
+}
+
+
+def _matches_marker(text_lower: str, marker: str) -> bool:
+    """Check if marker matches text using word boundaries for text tokens, or exact match for emoji."""
+    if any(ord(char) > 127 for char in marker):
+        return marker in text_lower
+    pattern = r"\b" + re.escape(marker) + r"\b"
+    return bool(re.search(pattern, text_lower))
+
+
+def compute_lexical_score(
+    text: str,
+    strong_markers: Set[str],
+    moderate_markers: Set[str],
+    cap: float = 2.0,
+) -> float:
+    """Compute normalized matched keyword intensity count for lexical calibration using word boundaries."""
+    text_lower = text.lower()
+    score = 0.0
+    for marker in strong_markers:
+        if _matches_marker(text_lower, marker):
+            score += 1.0
+    for marker in moderate_markers:
+        if _matches_marker(text_lower, marker):
+            score += 0.5
+    if "!" in text:
+        score += 0.25
+    if any(word.isupper() and len(word) > 2 for word in text.split()):
+        score += 0.25
+    return min(1.0, score / cap)
 
 
 class MultiDimensionalSentimentEngine:
@@ -185,46 +242,103 @@ class MultiDimensionalSentimentEngine:
             )
         return results
 
+    def analyze_nuanced_emotions_batch(
+        self,
+        texts: List[str],
+        batch_size: int = 32,
+        alpha_anx: float = 0.6,
+        alpha_exc: float = 0.6,
+    ) -> List[EmotionPrediction]:
+        """Classify nuanced emotions with lexical-arousal calibration for anxiety and excitement."""
+        if not texts:
+            return []
+
+        probs, _ = self._predict_logits(
+            self.EMOTION_MODEL_NAME, texts, batch_size=batch_size
+        )
+
+        results: List[EmotionPrediction] = []
+        for text, raw_probs in zip(texts, probs):
+            # Base emotion probabilities from model
+            p_joy = float(raw_probs.get("joy", 0.0))
+            p_fear = float(raw_probs.get("fear", 0.0))
+            p_anger = float(raw_probs.get("anger", 0.0))
+            p_sadness = float(raw_probs.get("sadness", 0.0))
+            p_surprise = float(raw_probs.get("surprise", 0.0))
+            p_disgust = float(raw_probs.get("disgust", 0.0))
+            p_neutral = float(raw_probs.get("neutral", 0.0))
+
+            # Lexical calibration scores
+            s_anx = compute_lexical_score(text, ANXIETY_STRONG_MARKERS, ANXIETY_MODERATE_MARKERS)
+            s_exc = compute_lexical_score(text, EXCITEMENT_STRONG_MARKERS, EXCITEMENT_MODERATE_MARKERS)
+            s_opt = compute_lexical_score(text, OPTIMISM_STRONG_MARKERS, OPTIMISM_MODERATE_MARKERS)
+
+            # Calibrate anxiety from fear only if anxiety lexical markers are present
+            if s_anx > 0.0:
+                p_anxiety = min(p_fear, p_fear * alpha_anx + (1.0 - alpha_anx) * s_anx)
+                p_fear_remaining = max(0.0, p_fear - p_anxiety)
+            else:
+                p_anxiety = 0.0
+                p_fear_remaining = p_fear
+
+            # Calibrate excitement from joy only if excitement lexical markers are present
+            if s_exc > 0.0:
+                p_excitement = min(p_joy, p_joy * alpha_exc + (1.0 - alpha_exc) * s_exc)
+                p_joy_remaining = max(0.0, p_joy - p_excitement)
+            else:
+                p_excitement = 0.0
+                p_joy_remaining = p_joy
+
+            # Optimism heuristic (decoupled from excitement; derived from joy and optimism markers)
+            if s_opt > 0.0:
+                p_optimism = min(p_joy_remaining, round(p_joy_remaining * 0.5 * s_opt, 4))
+                p_joy_remaining = max(0.0, p_joy_remaining - p_optimism)
+            else:
+                p_optimism = 0.0
+
+            calibrated_dict = {
+                "joy": p_joy_remaining,
+                "optimism": p_optimism,
+                "anger": p_anger,
+                "sadness": p_sadness,
+                "fear": p_fear_remaining,
+                "anxiety": p_anxiety,
+                "excitement": p_excitement,
+                "surprise": p_surprise,
+                "disgust": p_disgust,
+                "neutral": p_neutral,
+            }
+
+            # Normalize to sum 1.0 and fix rounding drift on dominant key
+            total = sum(calibrated_dict.values())
+            if total > 0.0:
+                for k in calibrated_dict:
+                    calibrated_dict[k] = round(calibrated_dict[k] / total, 4)
+                drift = round(1.0 - sum(calibrated_dict.values()), 4)
+                if drift != 0.0:
+                    dominant_k = max(calibrated_dict, key=lambda k: calibrated_dict[k])
+                    calibrated_dict[dominant_k] = round(calibrated_dict[dominant_k] + drift, 4)
+
+            # Determine dominant emotion
+            primary_label, max_score = max(calibrated_dict.items(), key=lambda item: item[1])
+            emotion_enum = EmotionType(primary_label)
+
+            results.append(
+                EmotionPrediction(
+                    primary_emotion=emotion_enum,
+                    score=max_score,
+                    probabilities=calibrated_dict,
+                )
+            )
+        return results
+
     def analyze_emotion_batch(
         self,
         texts: List[str],
         batch_size: int = 32,
     ) -> List[EmotionPrediction]:
-        """Classify nuanced emotions (joy, anger, sadness, fear/anxiety, surprise, disgust)."""
-        if not texts:
-            return []
-
-        probs, pred_indices = self._predict_logits(
-            self.EMOTION_MODEL_NAME, texts, batch_size=batch_size
-        )
-        model, _ = self._get_or_load_pipeline(self.EMOTION_MODEL_NAME)
-        id2label = model.config.id2label
-
-        # Map DistilRoBERTa emotion classes to EmotionType enum
-        label_map = {
-            "joy": EmotionType.JOY,
-            "fear": EmotionType.ANXIETY,
-            "anger": EmotionType.ANGER,
-            "sadness": EmotionType.SADNESS,
-            "surprise": EmotionType.SURPRISE,
-            "disgust": EmotionType.DISGUST,
-            "neutral": EmotionType.NEUTRAL,
-        }
-
-        results = []
-        for prob_dict, idx in zip(probs, pred_indices):
-            raw_emotion = id2label[idx].lower()
-            mapped_emotion = label_map.get(raw_emotion, EmotionType.NEUTRAL)
-            score = prob_dict.get(raw_emotion, 0.0)
-
-            results.append(
-                EmotionPrediction(
-                    primary_emotion=mapped_emotion,
-                    score=score,
-                    probabilities=prob_dict,
-                )
-            )
-        return results
+        """Classify nuanced emotions (calls calibrated analyze_nuanced_emotions_batch)."""
+        return self.analyze_nuanced_emotions_batch(texts, batch_size=batch_size)
 
     def analyze_stance_batch(
         self,
@@ -291,7 +405,7 @@ class MultiDimensionalSentimentEngine:
 
         stances: Optional[List[StancePrediction]] = None
         if target:
-            stances = self.analyze_stance_batch(texts, target=target, batch_size=batch_size)
+            stances = self.analyze_stance_towards_target(texts, target=target, batch_size=batch_size)
 
         results: List[MultiDimensionalResult] = []
 
@@ -348,3 +462,86 @@ class MultiDimensionalSentimentEngine:
     ) -> MultiDimensionalResult:
         """Analyze a single text string."""
         return self.analyze_multidimensional([text], target=target, irony_threshold=irony_threshold)[0]
+
+    def analyze_stance_towards_target(
+        self,
+        texts: List[str],
+        target: str = "general",
+        batch_size: int = 32,
+    ) -> List[StancePrediction]:
+        """Classify stance towards an explicit target (supportive, against, neutral)."""
+        if not texts:
+            return []
+
+        target_norm = target.lower().strip() if target else "general"
+        if target_norm in self.SUPPORTED_STANCE_TARGETS:
+            return self.analyze_stance_batch(texts, target=target_norm, batch_size=batch_size)
+
+        # Domain-agnostic stance inference via sentiment polarity alignment towards target
+        sentiments = self.analyze_sentiment_batch(texts, batch_size=batch_size)
+        results: List[StancePrediction] = []
+        for s in sentiments:
+            if s.polarity == SentimentPolarity.POSITIVE:
+                stance = StanceType.SUPPORTIVE
+            elif s.polarity == SentimentPolarity.NEGATIVE:
+                stance = StanceType.AGAINST
+            else:
+                stance = StanceType.NEUTRAL
+
+            results.append(
+                StancePrediction(
+                    stance=stance,
+                    score=s.score,
+                    target=target,
+                    probabilities={
+                        "supportive": s.probabilities.get("positive", 0.0),
+                        "against": s.probabilities.get("negative", 0.0),
+                        "neutral": s.probabilities.get("neutral", 0.0),
+                    },
+                )
+            )
+        return results
+
+    def analyze_and_flatten(
+        self,
+        texts: List[str],
+        post_ids: List[str],
+        target: Optional[str] = None,
+        batch_size: int = 32,
+    ) -> List[Dict[str, Any]]:
+        """Run batch inference and return flattened dictionaries matching post_analytics schema."""
+        if not texts or not post_ids:
+            return []
+
+        results = self.analyze_multidimensional(texts, target=target, batch_size=batch_size)
+        flattened: List[Dict[str, Any]] = []
+
+        for p_id, res in zip(post_ids, results):
+            emo_probs = res.emotion.probabilities
+            stance_val = res.stance.stance.value if res.stance else "neutral"
+            stance_score = res.stance.score if res.stance else 0.0
+
+            row = {
+                "post_id": str(p_id),
+                "effective_polarity": res.effective_polarity.value,
+                "sentiment_score": float(res.adjusted_sentiment_score),
+                "is_sarcastic": bool(res.is_sarcasm_inverted or res.irony.is_ironic),
+                "irony_score": float(res.irony.irony_score),
+                "primary_emotion": res.emotion.primary_emotion.value,
+                "emotion_score": float(res.emotion.score),
+                "joy": float(emo_probs.get("joy", 0.0)),
+                "optimism": float(emo_probs.get("optimism", 0.0)),
+                "anger": float(emo_probs.get("anger", 0.0)),
+                "sadness": float(emo_probs.get("sadness", 0.0)),
+                "fear": float(emo_probs.get("fear", 0.0)),
+                "anxiety": float(emo_probs.get("anxiety", 0.0)),
+                "excitement": float(emo_probs.get("excitement", 0.0)),
+                "surprise": float(emo_probs.get("surprise", 0.0)),
+                "disgust": float(emo_probs.get("disgust", 0.0)),
+                "neutral": float(emo_probs.get("neutral", 0.0)),
+                "stance": stance_val,
+                "stance_score": float(stance_score),
+            }
+            flattened.append(row)
+        return flattened
+

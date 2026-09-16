@@ -8,12 +8,11 @@ over the DuckDB analytical store.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, Iterator, List, Optional
 
 import polars as pl
 
-from hypesignal.models.canonical import CanonicalCascadeEvent, CanonicalPost
 from hypesignal.storage.duckdb_manager import DuckDBManager
 
 RE_INTERVAL = re.compile(r"^\d+\s+(?:second|minute|hour|day|week|month|year)s?$", re.IGNORECASE)
@@ -45,16 +44,22 @@ class TimelineManager:
 
     def get_timeline_slice(
         self,
-        start_time: datetime,
-        end_time: datetime,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
         platform: Optional[str] = None,
+        keyword: Optional[str] = None,
+        parent_id: Optional[str] = None,
+        author_id: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> pl.DataFrame:
-        """Extract a chronological slice of posts within [start_time, end_time]."""
+        """Extract a chronological slice of posts with optional keyword, parent/video, and platform filters."""
         return self.db.get_posts_in_window(
             start_time=start_time,
             end_time=end_time,
             platform=platform,
+            keyword=keyword,
+            parent_id=parent_id,
+            author_id=author_id,
             limit=limit,
         )
 
@@ -103,13 +108,17 @@ class TimelineManager:
         interval: str = "1 hour",
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
+        platform: Optional[str] = None,
+        keyword: Optional[str] = None,
     ) -> pl.DataFrame:
-        """Aggregate post volumes into regular time intervals.
+        """Aggregate post volumes into regular time intervals with optional platform and keyword filters.
         
         Args:
             interval: DuckDB time interval string (e.g., '10 minutes', '1 hour', '1 day').
             start_time: Optional start cutoff.
             end_time: Optional end cutoff.
+            platform: Optional platform filter.
+            keyword: Optional keyword or hashtag filter.
             
         Returns:
             Polars DataFrame with columns ['bucket', 'post_count'].
@@ -130,6 +139,12 @@ class TimelineManager:
         if end_time:
             where_clauses.append("timestamp <= ?")
             params.append(end_time)
+        if platform:
+            where_clauses.append("LOWER(platform) = LOWER(?)")
+            params.append(platform)
+        if keyword:
+            where_clauses.append("(text ILIKE ? OR CAST(hashtags AS VARCHAR) ILIKE ?)")
+            params.extend([f"%{keyword}%", f"%{keyword}%"])
 
         where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 

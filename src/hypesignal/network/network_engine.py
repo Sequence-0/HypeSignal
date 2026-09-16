@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 import networkx as nx
 
 from hypesignal.ingestion.lerman_adapter import LermanDatasetAdapter
+from hypesignal.network.bridge_kols import BridgeKOLAnalyzer, BridgeKOLLeaderboard, BridgeKOLProfile
 from hypesignal.network.cascade_tracer import CascadeTracer
 from hypesignal.network.community_detector import CommunityDetector
 from hypesignal.network.graph_store import BaseGraphStore, NetworkXGraphStore
@@ -38,6 +39,8 @@ class NetworkEngine:
         kol_analyzer: Optional[KOLAnalyzer] = None,
         community_detector: Optional[CommunityDetector] = None,
         cascade_tracer: Optional[CascadeTracer] = None,
+        bridge_kol_analyzer: Optional[BridgeKOLAnalyzer] = None,
+        db: Optional[DuckDBManager] = None,
     ) -> None:
         """Initialize NetworkEngine with modular sub-components.
         
@@ -46,13 +49,40 @@ class NetworkEngine:
             kol_analyzer: Custom KOLAnalyzer or standard weighted centralities.
             community_detector: Custom CommunityDetector (Louvain / LPA).
             cascade_tracer: Custom CascadeTracer.
+            bridge_kol_analyzer: Custom BridgeKOLAnalyzer for boundary spanners.
+            db: Optional DuckDBManager instance for community persistence.
         """
         self.graph_store = graph_store or NetworkXGraphStore()
         self.kol_analyzer = kol_analyzer or KOLAnalyzer()
         self.community_detector = community_detector or CommunityDetector()
         self.cascade_tracer = cascade_tracer or CascadeTracer()
+        self.bridge_kol_analyzer = bridge_kol_analyzer or BridgeKOLAnalyzer()
+        self.db = db
         self._cached_kol_profiles: Optional[Dict[str, KOLProfile]] = None
         self._cached_revision: int = -1
+
+    def detect_communities(
+        self,
+        min_community_size: int = 2,
+        db: Optional[DuckDBManager] = None,
+    ) -> CommunityDetectionResult:
+        """Detect Louvain communities and automatically persist partition to DuckDB user_communities."""
+        comm_res = self.community_detector.detect_communities(
+            graph_store=self.graph_store,
+            min_community_size=min_community_size,
+        )
+        target_db = db or self.db
+        if target_db is not None and comm_res.partition:
+            mod_score = float(comm_res.modularity) if comm_res.modularity is not None else 0.0
+            assignments = [
+                (str(node_id), int(comm_id), mod_score)
+                for node_id, comm_id in comm_res.partition.items()
+            ]
+            try:
+                target_db.upsert_user_communities(assignments)
+            except Exception as e:
+                logger.warning("Failed to persist user communities to DuckDB: %s", e)
+        return comm_res
 
     def invalidate_cache(self) -> None:
         """Explicitly invalidate cached influencer rankings."""
@@ -153,9 +183,9 @@ class NetworkEngine:
             density = 0.0
 
         # 2. Community Detection
-        comm_res = self.community_detector.detect_communities(
-            graph_store=self.graph_store,
+        comm_res = self.detect_communities(
             min_community_size=min_community_size,
+            db=db,
         )
 
         # 3. User metadata lookup from DuckDB (if available)
@@ -237,9 +267,9 @@ class NetworkEngine:
             return []
 
         # 1. Detect communities so community_id is always consistently populated
-        comm_res = self.community_detector.detect_communities(
-            graph_store=self.graph_store,
+        comm_res = self.detect_communities(
             min_community_size=min_community_size,
+            db=db,
         )
 
         # 2. Resolve screen names from DuckDB
@@ -305,6 +335,37 @@ class NetworkEngine:
             db=db,
             cascade_id=cascade_id,
             graph_store=self.graph_store,
+        )
+
+    def get_bridge_kols(
+        self,
+        top_k: int = 20,
+        min_neighbors: int = 2,
+        min_cross_ratio: float = 0.0,
+        db: Optional[DuckDBManager] = None,
+        min_community_size: int = 2,
+    ) -> BridgeKOLLeaderboard:
+        """Identify and rank boundary spanner nodes bridging distinct communities.
+        
+        Args:
+            top_k: Maximum number of bridge nodes to return.
+            min_neighbors: Minimum degree required to qualify as bridge candidate.
+            min_cross_ratio: Minimum C(u) required to qualify.
+            db: Optional DuckDBManager instance for user screen_name resolution.
+            min_community_size: Minimum size of communities to partition into.
+            
+        Returns:
+            BridgeKOLLeaderboard containing ranked BridgeKOLProfile entries.
+        """
+        target_db = db or self.db
+        comm_res = self.detect_communities(min_community_size=min_community_size, db=target_db)
+        return self.bridge_kol_analyzer.analyze_bridges(
+            graph_store=self.graph_store,
+            community_partition=comm_res.partition,
+            top_k=top_k,
+            min_neighbors=min_neighbors,
+            min_cross_ratio=min_cross_ratio,
+            db=target_db,
         )
 
     def export_subgraph(
