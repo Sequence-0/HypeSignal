@@ -262,8 +262,10 @@ def create_app(
     # CORS Middleware: Explicit origin allowlist (disallow wildcard credentials)
     safe_origins = cors_origins or [
         "http://localhost:3000",
+        "http://localhost:8080",
         "http://localhost:8000",
         "http://127.0.0.1:3000",
+        "http://127.0.0.1:8080",
         "http://127.0.0.1:8000",
     ]
     has_wildcard = "*" in safe_origins
