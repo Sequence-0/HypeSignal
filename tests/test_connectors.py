@@ -514,3 +514,221 @@ def test_youtube_connector_url_and_key_sanitization():
     first_param_url = "https://example.com/api?key=mysecretkey&other=1"
     assert _sanitize_url(first_param_url) == "https://example.com/api?key=[REDACTED]&other=1"
 
+
+def test_telegram_connector_normalization_telethon_message():
+    """Test normalizing a Telethon Message object into CanonicalPost."""
+    from datetime import datetime, timezone
+    from telethon.tl.custom.message import Message
+    from telethon.tl.types import (
+        MessageReactions,
+        MessageReplies,
+        PeerChannel,
+        ReactionCount,
+        ReactionEmoji,
+    )
+
+    reactions = MessageReactions(
+        results=[
+            ReactionCount(reaction=ReactionEmoji(emoticon="🚀"), count=15),
+            ReactionCount(reaction=ReactionEmoji(emoticon="🔥"), count=10),
+        ]
+    )
+    replies = MessageReplies(replies=25, replies_pts=100)
+
+    msg = Message(
+        id=4567,
+        peer_id=PeerChannel(channel_id=998877),
+        date=datetime(2026, 9, 16, 10, 0, 0, tzinfo=timezone.utc),
+        message="Exploring decentralized compute #ai #gpu https://hypesignal.org @channel_admin",
+        views=4500,
+        forwards=120,
+        replies=replies,
+        reactions=reactions,
+        post_author="LeadResearcher",
+    )
+
+    conn = TelegramConnector()
+    post = conn.normalize_post(msg)
+
+    assert post.id == "tg_-1000000998877_4567"
+    assert post.platform == PlatformType.TELEGRAM
+    assert post.author_screen_name == "LeadResearcher"
+    assert "Exploring decentralized compute" in post.text
+    assert post.metrics.views == 4500
+    assert post.metrics.reposts == 120
+    assert post.metrics.replies == 25
+    assert post.metrics.likes == 25
+    assert "ai" in post.hashtags
+    assert "gpu" in post.hashtags
+    assert "https://hypesignal.org" in post.urls
+    assert post.extra_metadata["message_id"] == 4567
+
+
+def test_telegram_connector_credentials_and_test_mode():
+    """Test configuring Telegram MTProto credentials, test environment DC, and sanitization."""
+    from hypesignal.connectors.telegram import _sanitize_key as _sanitize_tg_key
+
+    assert _sanitize_tg_key("0123456789abcdef0123456789abcdef") == "0123...cdef"
+    assert _sanitize_tg_key(None) == "<none>"
+    assert _sanitize_tg_key("") == "<none>"
+    assert _sanitize_tg_key("short") == "***"
+
+    config = ConnectorConfig(
+        platform=PlatformType.TELEGRAM,
+        credentials={
+            "api_id": 987654,
+            "api_hash": "abcdef0123456789abcdef0123456789",
+            "app_title": "TestHypeSignal",
+            "short_name": "testhypesignal",
+            "test_mode": True,
+            "test_dc_id": 2,
+            "test_dc_ip": "149.154.167.40",
+            "test_dc_port": 443,
+            "channels": ["signal_dev", "telethon"],
+        },
+    )
+
+    conn = TelegramConnector(config=config)
+    assert conn.api_id == 987654
+    assert conn.api_hash == "abcdef0123456789abcdef0123456789"
+    assert conn.app_title == "TestHypeSignal"
+    assert conn.short_name == "testhypesignal"
+    assert conn.test_mode is True
+    assert conn.test_dc_id == 2
+    assert conn.test_dc_ip == "149.154.167.40"
+    assert conn.test_dc_port == 443
+    assert conn.default_channels == ["signal_dev", "telethon"]
+
+
+def test_telegram_connector_public_key_registration():
+    """Test registering custom PKCS#1 RSA public keys into Telethon."""
+    import rsa
+    from telethon.crypto import rsa as tl_rsa
+
+    (pub, _) = rsa.newkeys(1024)
+    pem_str = pub.save_pkcs1().decode("utf-8")
+
+    initial_keys = len(tl_rsa._server_keys)
+    config = ConnectorConfig(
+        platform=PlatformType.TELEGRAM,
+        credentials={
+            "api_id": 112233,
+            "api_hash": "0123456789abcdef0123456789abcdef",
+            "test_mode": True,
+            "public_keys": pem_str,
+        },
+    )
+    conn = TelegramConnector(config=config)
+    conn._register_public_keys()
+    assert len(tl_rsa._server_keys) >= initial_keys + 1
+
+
+def test_telegram_connector_offline_mock_fallback():
+    """Test that TelegramConnector seamlessly returns fallback posts when credentials are absent."""
+    config = ConnectorConfig(
+        platform=PlatformType.TELEGRAM,
+        credentials={"api_id": None, "api_hash": None},
+    )
+    conn = TelegramConnector(config=config)
+    posts = conn.poll(query="market trends", limit=3)
+    assert len(posts) > 0
+    assert posts[0].platform == PlatformType.TELEGRAM
+    assert "market trends" in posts[0].text
+    assert conn.stats.messages_ingested > 0
+
+
+def test_telegram_connector_sqlite_session_test_mode(tmp_path):
+    """Test that session_name with test_mode correctly initializes SQLiteSession without AttributeError."""
+    import os
+
+    session_file = str(tmp_path / "custom_test_session")
+    config = ConnectorConfig(
+        platform=PlatformType.TELEGRAM,
+        credentials={
+            "api_id": 998877,
+            "api_hash": "0123456789abcdef0123456789abcdef",
+            "session_name": session_file,
+            "test_mode": True,
+            "test_dc_id": 2,
+            "test_dc_ip": "149.154.167.40",
+            "test_dc_port": 443,
+        },
+    )
+    conn = TelegramConnector(config=config)
+    try:
+        client = conn._get_client()
+        assert client is not None
+        assert hasattr(client.session, "set_dc")
+        assert client.session.server_address == "149.154.167.40"
+        assert client.session.port == 443
+    finally:
+        conn.disconnect()
+        if os.path.exists(f"{session_file}.session"):
+            os.remove(f"{session_file}.session")
+
+
+def test_telegram_connector_reconnect_lifecycle():
+    """Test that disconnect -> reconnect properly re-initializes client without stale loop errors."""
+    config = ConnectorConfig(
+        platform=PlatformType.TELEGRAM,
+        credentials={
+            "api_id": 12345,
+            "api_hash": "abcdef0123456789abcdef0123456789",
+        },
+    )
+    conn = TelegramConnector(config=config)
+    conn.connect()
+    assert conn.is_connected()
+
+    # Disconnect must clean up client and loop
+    conn.disconnect()
+    assert not conn.is_connected()
+    assert conn._client is None
+    assert conn._loop_thread is None
+
+    # Reconnecting must create fresh client and loop
+    conn.connect()
+    assert conn.is_connected()
+    assert conn._client is not None
+    conn.disconnect()
+
+
+def test_telegram_connector_mock_client_poll():
+    """Test polling through an injected mock TelegramClient."""
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, MagicMock
+    from telethon.tl.custom.message import Message
+    from telethon.tl.types import PeerChannel
+
+    sample_msg = Message(
+        id=777,
+        peer_id=PeerChannel(channel_id=12345),
+        date=datetime(2026, 9, 16, 11, 0, 0, tzinfo=timezone.utc),
+        message="Live channel update on #telegram https://t.me/telegram",
+        views=3200,
+        forwards=40,
+    )
+
+    mock_client = MagicMock()
+    mock_client.is_connected = MagicMock(return_value=True)
+    mock_client.is_user_authorized = AsyncMock(return_value=True)
+
+    async def mock_iter_messages(*args, **kwargs):
+        yield sample_msg
+
+    mock_client.iter_messages = mock_iter_messages
+
+    config = ConnectorConfig(
+        platform=PlatformType.TELEGRAM,
+        credentials={"api_id": 12345, "api_hash": "abcdef0123456789abcdef0123456789"},
+    )
+    conn = TelegramConnector(config=config, client=mock_client)
+    posts = conn.poll(query="@telegram", limit=5)
+
+    assert len(posts) == 1
+    assert posts[0].id == "tg_-1000000012345_777"
+    assert "Live channel update" in posts[0].text
+    assert posts[0].metrics.views == 3200
+
+
+

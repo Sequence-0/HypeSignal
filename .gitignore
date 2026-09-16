@@ -13,9 +13,12 @@ wheels/
 Dataset/
 
 # Docs
-Problem_Statement.md
+# Problem_Statement.md
 
 # Environment and local secrets
 .env
 .env.*
 !.env.example
+*.session
+*.session-journal
+

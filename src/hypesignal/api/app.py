@@ -144,12 +144,64 @@ def create_app(
                 max_requests_per_minute=yt_max_rpm,
                 credentials=yt_creds,
             )
+
+            # Telegram MTProto Connector Configuration
+            tg_api_id = os.getenv("TELEGRAM_API_ID")
+            tg_api_hash = os.getenv("TELEGRAM_API_HASH")
+            tg_max_rpm = int(os.getenv("TELEGRAM_MAX_RPM", "30"))
+            tg_creds: Dict[str, Any] = {}
+            if tg_api_id:
+                try:
+                    tg_creds["api_id"] = int(tg_api_id)
+                except ValueError:
+                    tg_creds["api_id"] = tg_api_id
+            if tg_api_hash:
+                tg_creds["api_hash"] = tg_api_hash
+            if os.getenv("TELEGRAM_APP_TITLE"):
+                tg_creds["app_title"] = os.getenv("TELEGRAM_APP_TITLE")
+            if os.getenv("TELEGRAM_SHORT_NAME"):
+                tg_creds["short_name"] = os.getenv("TELEGRAM_SHORT_NAME")
+            if os.getenv("TELEGRAM_BOT_TOKEN"):
+                tg_creds["bot_token"] = os.getenv("TELEGRAM_BOT_TOKEN")
+            if os.getenv("TELEGRAM_SESSION_STRING"):
+                tg_creds["session_string"] = os.getenv("TELEGRAM_SESSION_STRING")
+            if os.getenv("TELEGRAM_SESSION_NAME"):
+                tg_creds["session_name"] = os.getenv("TELEGRAM_SESSION_NAME")
+            if os.getenv("TELEGRAM_TEST_MODE"):
+                tg_creds["test_mode"] = os.getenv("TELEGRAM_TEST_MODE", "false").lower() in ("1", "true", "yes")
+            if os.getenv("TELEGRAM_TEST_DC_ID"):
+                try:
+                    tg_creds["test_dc_id"] = int(os.getenv("TELEGRAM_TEST_DC_ID"))
+                except ValueError:
+                    pass
+            if os.getenv("TELEGRAM_TEST_DC_IP"):
+                tg_creds["test_dc_ip"] = os.getenv("TELEGRAM_TEST_DC_IP")
+            if os.getenv("TELEGRAM_TEST_DC_PORT"):
+                try:
+                    tg_creds["test_dc_port"] = int(os.getenv("TELEGRAM_TEST_DC_PORT"))
+                except ValueError:
+                    pass
+            if os.getenv("TELEGRAM_PUBLIC_KEYS"):
+                tg_creds["public_keys"] = os.getenv("TELEGRAM_PUBLIC_KEYS")
+            elif os.getenv("TELEGRAM_TEST_PUBLIC_KEY"):
+                tg_creds["public_keys"] = os.getenv("TELEGRAM_TEST_PUBLIC_KEY")
+            if os.getenv("TELEGRAM_CHANNELS"):
+                tg_creds["channels"] = [
+                    c.strip() for c in os.getenv("TELEGRAM_CHANNELS").split(",") if c.strip()
+                ]
+
+            tg_config = ConnectorConfig(
+                platform=PlatformType.TELEGRAM,
+                max_requests_per_minute=tg_max_rpm,
+                credentials=tg_creds,
+            )
+
             app_connectors = {
                 "twitter": TwitterConnector(),
                 "bluesky": BlueskyConnector(),
                 "reddit": RedditConnector(),
                 "youtube": YouTubeConnector(config=yt_config),
-                "telegram": TelegramConnector(),
+                "telegram": TelegramConnector(config=tg_config),
             }
         app.state.connectors = app_connectors
 
